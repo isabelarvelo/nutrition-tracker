@@ -21,6 +21,9 @@ const catalog: Array<{ terms: string[]; name: string; quantity: number; unit: st
   { terms: ['salad'], name: 'Mixed salad with dressing', quantity: 2, unit: 'cups', nutrients: { calories: 210, protein: 5, carbs: 16, fat: 14, fiber: 6, iron: 2.2, calcium: 90, vitaminC: 32 } },
   { terms: ['salmon'], name: 'Baked salmon', quantity: 5, unit: 'oz', nutrients: { calories: 295, protein: 31, carbs: 0, fat: 18, fiber: 0, iron: .7, calcium: 18, vitaminC: 0 } },
   { terms: ['coffee'], name: 'Coffee with milk', quantity: 1, unit: 'cup', nutrients: { calories: 35, protein: 2, carbs: 3, fat: 1.5, fiber: 0, iron: 0, calcium: 75, vitaminC: 0 } },
+  { terms: ['brami protein pasta', 'brami pasta'], name: 'Brami protein pasta', quantity: 1, unit: 'cup', nutrients: { calories: 220, protein: 20, carbs: 35, fat: 1.5, fiber: 8, iron: 3, calcium: 30, vitaminC: 0 } },
+  { terms: ['parmesan cheese', 'parmesan'], name: 'Parmesan cheese', quantity: 1, unit: 'sprinkle', nutrients: { calories: 22, protein: 2, carbs: .2, fat: 1.4, fiber: 0, iron: 0, calcium: 65, vitaminC: 0 } },
+  { terms: ['stok cold brew', 'cold brew'], name: 'STōK cold brew', quantity: 1, unit: 'cup', nutrients: { calories: 15, protein: 1, carbs: 3, fat: 0, fiber: 0, iron: 0, calcium: 10, vitaminC: 0 } },
 ];
 
 async function identity() {
@@ -73,23 +76,69 @@ async function getState(userId: string) {
   return { events, library, goals: goal ? { calories: Number(goal.calories), protein: Number(goal.protein), carbs: Number(goal.carbs), fat: Number(goal.fat), fiber: Number(goal.fiber) } : DEFAULT_GOALS };
 }
 
+function splitFoodList(text: string) {
+  return text
+    .replace(/^\s*[*•-]\s*/, '')
+    .split(/\s*(?:,|;|\n)\s*|\s+and\s+(?=(?:\d+(?:\.\d+)?|\d+\/\d+|a\b|an\b|one\b|two\b|half\b|sprinkle\b|dash\b|handful\b))/i)
+    .map((part) => part.replace(/^\s*(?:and|plus)\s+/i, '').trim())
+    .filter(Boolean);
+}
+
+function parsedAmount(segment: string, fallbackQuantity: number, fallbackUnit: string) {
+  const numberWords: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, half: .5 };
+  const match = segment.match(/^\s*(\d+(?:\.\d+)?|\d+\/\d+|a|an|one|two|half)\s*(cups?|tbsp|tablespoons?|tsp|teaspoons?|oz|ounces?|grams?|g|scoops?|slices?|large|medium|small|servings?)?\b/i);
+  if (!match) {
+    if (/^\s*sprinkle\b/i.test(segment)) return { quantity: 1, unit: 'sprinkle', scale: fallbackUnit === 'sprinkle' ? 1 : .25 };
+    return { quantity: fallbackQuantity, unit: fallbackUnit, scale: 1 };
+  }
+  const raw = match[1].toLowerCase();
+  const quantity = raw.includes('/') ? Number(raw.split('/')[0]) / Number(raw.split('/')[1]) : (numberWords[raw] ?? Number(raw));
+  const unit = match[2]?.toLowerCase().replace(/tablespoons?/, 'tbsp').replace(/teaspoons?/, 'tsp').replace(/ounces?/, 'oz') ?? fallbackUnit;
+  const compatible = unit.replace(/s$/, '') === fallbackUnit.replace(/s$/, '');
+  return { quantity, unit, scale: compatible ? quantity / fallbackQuantity : 1 };
+}
+
+function scaleNutrients(nutrients: Nutrients, scale: number): Nutrients {
+  return {
+    calories: nutrients.calories * scale,
+    protein: nutrients.protein * scale,
+    carbs: nutrients.carbs * scale,
+    fat: nutrients.fat * scale,
+    fiber: nutrients.fiber * scale,
+    iron: nutrients.iron == null ? null : nutrients.iron * scale,
+    calcium: nutrients.calcium == null ? null : nutrients.calcium * scale,
+    vitaminC: nutrients.vitaminC == null ? null : nutrients.vitaminC * scale,
+  };
+}
+
+function cleanFoodName(segment: string) {
+  const name = segment
+    .replace(/^\s*(?:\d+(?:\.\d+)?|\d+\/\d+|a|an|one|two|half)\s*/i, '')
+    .replace(/^(?:cups?|tbsp|tablespoons?|tsp|teaspoons?|oz|ounces?|grams?|g|scoops?|slices?|large|medium|small|servings?)\s+(?:of\s+)?/i, '')
+    .replace(/^(?:sprinkle|dash|handful)\s+(?:of\s+)?/i, '')
+    .trim();
+  return name ? name[0].toUpperCase() + name.slice(1) : 'Food item';
+}
+
 function interpretedItems(text: string, library: LibraryItem[], hasPhoto: boolean): FoodItem[] {
-  const lower = text.toLowerCase();
-  const matches: FoodItem[] = [];
-  for (const saved of library) {
-    if ([saved.name, saved.alias].filter(Boolean).some((term) => lower.includes(term.toLowerCase()))) {
-      matches.push({ ...saved, id: crypto.randomUUID(), source: 'personal library', confidence: .96, completeness: .95 });
+  const segments = splitFoodList(text);
+  const items = segments.map((segment): FoodItem => {
+    const lower = segment.toLowerCase();
+    const saved = library.find((item) => [item.name, item.alias].filter(Boolean).some((term) => lower.includes(term.toLowerCase())));
+    if (saved) {
+      const amount = parsedAmount(segment, saved.quantity, saved.unit);
+      return { ...saved, id: crypto.randomUUID(), quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(saved, amount.scale), source: 'personal library', confidence: .96, completeness: .95 };
     }
-  }
-  for (const food of catalog) {
-    if (food.terms.some((term) => lower.includes(term)) && !matches.some((item) => item.name === food.name)) {
-      matches.push({ id: crypto.randomUUID(), name: food.name, quantity: food.quantity, unit: food.unit, ...food.nutrients, source: 'reference estimate', confidence: .78, completeness: .86 });
+    const food = catalog.find((item) => item.terms.some((term) => lower.includes(term)));
+    if (food) {
+      const amount = parsedAmount(segment, food.quantity, food.unit);
+      return { id: crypto.randomUUID(), name: food.name, quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(food.nutrients, amount.scale), source: 'reference estimate', confidence: .78, completeness: .86 };
     }
-  }
-  if (!matches.length && (text.trim() || hasPhoto)) {
-    matches.push({ id: crypto.randomUUID(), name: text.trim() ? 'Meal estimate' : 'Meal from photo', quantity: 1, unit: 'serving', calories: 450, protein: 22, carbs: 48, fat: 19, fiber: 6, iron: null, calcium: null, vitaminC: null, source: 'AI-style estimate', confidence: hasPhoto ? .45 : .55, completeness: .45 });
-  }
-  return matches;
+    const amount = parsedAmount(segment, 1, 'serving');
+    return { id: crypto.randomUUID(), name: cleanFoodName(segment), quantity: amount.quantity, unit: amount.unit, calories: 150, protein: 5, carbs: 18, fat: 6, fiber: 2, iron: null, calcium: null, vitaminC: null, source: 'item estimate', confidence: .35, completeness: .35 };
+  });
+  if (!items.length && hasPhoto) items.push({ id: crypto.randomUUID(), name: 'Meal from photo', quantity: 1, unit: 'serving', calories: 450, protein: 22, carbs: 48, fat: 19, fiber: 6, iron: null, calcium: null, vitaminC: null, source: 'AI-style estimate', confidence: .45, completeness: .45 });
+  return items;
 }
 
 async function insertItems(eventId: string, items: FoodItem[]) {
@@ -140,10 +189,19 @@ export async function POST(request: Request) {
   const ownedEvent = async (eventId: string) => env.DB.prepare('SELECT id FROM events WHERE id = ? AND user_id = ?').bind(eventId, user.userId).first();
   if (action === 'verify' && await ownedEvent(String(body.eventId))) {
     await env.DB.prepare(`UPDATE events SET status = 'verified', updated_at = ? WHERE id = ?`).bind(new Date().toISOString(), body.eventId).run();
+  } else if (action === 'update_event' && await ownedEvent(String(body.eventId))) {
+    await env.DB.prepare(`UPDATE events SET occurred_at = ?, meal_type = ?, note = ?, updated_at = ? WHERE id = ?`).bind(String(body.occurredAt),String(body.mealType),String(body.note ?? ''),new Date().toISOString(),body.eventId).run();
   } else if (action === 'update_item') {
     const item = body.item as FoodItem;
     const row = await env.DB.prepare('SELECT e.user_id FROM logged_items li JOIN events e ON e.id = li.event_id WHERE li.id = ?').bind(item.id).first<D1Row>();
     if (row?.user_id === user.userId) await env.DB.prepare(`UPDATE logged_items SET name=?,quantity=?,unit=?,calories=?,protein=?,carbs=?,fat=?,fiber=?,iron=?,calcium=?,vitamin_c=? WHERE id=?`).bind(item.name,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,item.id).run();
+  } else if (action === 'add_item' && await ownedEvent(String(body.eventId))) {
+    const item = body.item as FoodItem;
+    await insertItems(String(body.eventId), [{ ...item, id: crypto.randomUUID(), source: item.source || 'manual', confidence: item.confidence ?? 1, completeness: item.completeness ?? 1 }]);
+  } else if (action === 'delete_item') {
+    const itemId = String(body.itemId);
+    const row = await env.DB.prepare('SELECT e.user_id FROM logged_items li JOIN events e ON e.id = li.event_id WHERE li.id = ?').bind(itemId).first<D1Row>();
+    if (row?.user_id === user.userId) await env.DB.prepare('DELETE FROM logged_items WHERE id = ?').bind(itemId).run();
   } else if (action === 'delete_event' && await ownedEvent(String(body.eventId))) {
     const ev = await env.DB.prepare('SELECT storage_key FROM evidence WHERE event_id = ?').bind(body.eventId).all<D1Row>();
     for (const file of ev.results) if (file.storage_key) await env.FILES.delete(String(file.storage_key));

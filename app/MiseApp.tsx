@@ -11,6 +11,15 @@ const nutrientKeys: Array<keyof Pick<Nutrients, 'calories'|'protein'|'carbs'|'fa
 
 function dayKey(value: string) { return new Date(value).toLocaleDateString('en-CA'); }
 function todayKey() { return new Date().toLocaleDateString('en-CA'); }
+function localDateTimeValue(value: string | Date) {
+  const date = typeof value === 'string' ? new Date(value) : value;
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+function captureTimeForDay(day: string) {
+  const now = new Date();
+  return `${day}T${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+}
 function sumItems(items: FoodItem[]): Nutrients {
   return items.reduce((sum, item) => ({
     calories: sum.calories + item.calories, protein: sum.protein + item.protein, carbs: sum.carbs + item.carbs,
@@ -32,6 +41,8 @@ export default function MiseApp() {
   const [transcript, setTranscript] = useState('');
   const [photos, setPhotos] = useState<File[]>([]);
   const [mealType, setMealType] = useState('Breakfast');
+  const [captureDate, setCaptureDate] = useState(() => localDateTimeValue(new Date()));
+  const [selectedDay, setSelectedDay] = useState(todayKey());
   const [expanded, setExpanded] = useState<string | null>(null);
   const [toast, setToast] = useState('');
   const [listening, setListening] = useState(false);
@@ -50,11 +61,11 @@ export default function MiseApp() {
   useEffect(() => { load(); }, [load]);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 3200); return () => clearTimeout(timer); }, [toast]);
 
-  const todayEvents = useMemo(() => state.events.filter((event) => dayKey(event.occurredAt) === todayKey()), [state.events]);
-  const todayTotals = useMemo(() => sumItems(todayEvents.flatMap((event) => event.items)), [todayEvents]);
+  const selectedEvents = useMemo(() => state.events.filter((event) => dayKey(event.occurredAt) === selectedDay), [state.events, selectedDay]);
+  const selectedTotals = useMemo(() => sumItems(selectedEvents.flatMap((event) => event.items)), [selectedEvents]);
   const reviewEvents = state.events.filter((event) => event.status !== 'verified');
-  const verifiedCalories = todayEvents.filter((event) => event.status === 'verified').reduce((sum, event) => sum + eventTotals(event).calories, 0);
-  const coverage = todayTotals.calories ? Math.round((verifiedCalories / todayTotals.calories) * 100) : 0;
+  const verifiedCalories = selectedEvents.filter((event) => event.status === 'verified').reduce((sum, event) => sum + eventTotals(event).calories, 0);
+  const coverage = selectedTotals.calories ? Math.round((verifiedCalories / selectedTotals.calories) * 100) : 0;
 
   async function action(body: Record<string, unknown>, success?: string) {
     setSaving(true);
@@ -70,7 +81,7 @@ export default function MiseApp() {
     if (!note.trim() && !transcript.trim() && !photos.length) { setToast('Add a note, voice description, or photo first.'); return; }
     setSaving(true);
     const form = new FormData();
-    form.set('payload', JSON.stringify({ note, transcript, mealType, occurredAt: new Date().toISOString() }));
+    form.set('payload', JSON.stringify({ note, transcript, mealType, occurredAt: new Date(captureDate).toISOString() }));
     photos.forEach((photo) => form.append('photos', photo));
     try {
       const response = await fetch('/api/state', { method: 'POST', body: form });
@@ -92,6 +103,11 @@ export default function MiseApp() {
     recognition.onend = () => setListening(false); setListening(true); recognition.start();
   }
 
+  function openCapture(day = selectedDay) {
+    setCaptureDate(captureTimeForDay(day));
+    setCaptureOpen(true);
+  }
+
   function exportData() {
     const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), ...state }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `mise-export-${todayKey()}.json`; link.click(); URL.revokeObjectURL(url);
@@ -109,12 +125,12 @@ export default function MiseApp() {
       <div className="desktop-grid">
         <nav className="side-nav" aria-label="Primary navigation">
           <div className="nav-date"><strong>{new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</strong><span>{new Date().toLocaleDateString('en-US', { weekday: 'long' })}</span></div>
-          {([['today','Today','⌂'],['review','Review','◌'],['trends','Trends','↗'],['library','Library','◇']] as const).map(([id,label,icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><span>{icon}</span>{label}{id === 'review' && reviewEvents.length > 0 && <em>{reviewEvents.length}</em>}</button>)}
+          {([['today','Journal','⌂'],['review','Review','◌'],['trends','Trends','↗'],['library','Library','◇']] as const).map(([id,label,icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><span>{icon}</span>{label}{id === 'review' && reviewEvents.length > 0 && <em>{reviewEvents.length}</em>}</button>)}
           <div className="side-note"><span>Private by design</span><p>Your photos and food records are only available to you.</p></div>
         </nav>
 
         <section className="main-content">
-          {view === 'today' && <TodayView events={todayEvents} totals={todayTotals} goals={state.goals} coverage={coverage} expanded={expanded} setExpanded={setExpanded} action={action} onCapture={() => setCaptureOpen(true)} saving={saving} />}
+          {view === 'today' && <TodayView events={selectedEvents} totals={selectedTotals} goals={state.goals} coverage={coverage} selectedDay={selectedDay} setSelectedDay={setSelectedDay} expanded={expanded} setExpanded={setExpanded} action={action} onCapture={() => openCapture()} saving={saving} />}
           {view === 'review' && <ReviewView events={reviewEvents} expanded={expanded} setExpanded={setExpanded} action={action} saving={saving} />}
           {view === 'trends' && <TrendsView events={state.events} goals={state.goals} onSave={(goals) => action({ action: 'save_goals', goals }, 'Goals updated.')} onDeleteAll={() => { if (window.confirm('Permanently delete every meal, photo, saved food, and goal? This cannot be undone.')) action({ action:'delete_all' }, 'All food-tracking data was deleted.'); }} />}
           {view === 'library' && <LibraryView items={state.library} onSave={(item) => action({ action: 'save_library', item }, 'Added to your library.')} saving={saving} />}
@@ -122,14 +138,16 @@ export default function MiseApp() {
       </div>
 
       <nav className="mobile-nav" aria-label="Primary navigation">
-        {([['today','Today','⌂'],['review','Review','◌'],['trends','Trends','↗'],['library','Library','◇']] as const).map(([id,label,icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><span>{icon}</span>{label}</button>)}
+        {([['today','Journal','⌂'],['review','Review','◌'],['trends','Trends','↗'],['library','Library','◇']] as const).map(([id,label,icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><span>{icon}</span>{label}</button>)}
       </nav>
-      <button className="mobile-capture" onClick={() => setCaptureOpen(true)} aria-label="Capture a meal">＋</button>
+      <button className="mobile-capture" onClick={() => openCapture()} aria-label="Capture a meal">＋</button>
 
       {captureOpen && <div className="modal-backdrop" onMouseDown={() => !saving && setCaptureOpen(false)}><section className="capture-sheet" onMouseDown={(event) => event.stopPropagation()} aria-modal="true" role="dialog" aria-labelledby="capture-title">
         <div className="sheet-handle" /><div className="capture-head"><div><span className="eyebrow">Quick capture</span><h2 id="capture-title">What did you have?</h2></div><button className="close-button" onClick={() => setCaptureOpen(false)}>×</button></div>
         <div className="meal-types">{['Breakfast','Lunch','Dinner','Snack'].map((type) => <button key={type} onClick={() => setMealType(type)} className={mealType === type ? 'selected' : ''}>{type}</button>)}</div>
-        <textarea className="capture-input" value={note} onChange={(event) => setNote(event.target.value)} placeholder='Try “oats with banana and almond butter”' autoFocus />
+        <label className="capture-date">Date and time<input type="datetime-local" value={captureDate} onChange={(event) => setCaptureDate(event.target.value)} /></label>
+        <textarea className="capture-input" value={note} onChange={(event) => setNote(event.target.value)} placeholder='Try “1 cup pasta, 2 eggs, parmesan, and 1 cup cold brew”' autoFocus />
+        <p className="capture-hint">Separate foods with commas or “and” and Mise will create an item for each one.</p>
         {transcript && <div className="transcript"><span>Voice note</span><textarea value={transcript} onChange={(event) => setTranscript(event.target.value)} /></div>}
         {photos.length > 0 && <div className="photo-strip">{photos.map((photo, index) => <div key={`${photo.name}-${index}`}><img src={URL.createObjectURL(photo)} alt={`Meal evidence ${index + 1}`} /><button onClick={() => setPhotos((all) => all.filter((_, i) => i !== index))}>×</button></div>)}</div>}
         <input ref={fileRef} className="sr-only" type="file" accept="image/*" multiple capture="environment" onChange={(event) => setPhotos((all) => [...all, ...Array.from(event.target.files ?? [])])} />
@@ -142,17 +160,21 @@ export default function MiseApp() {
   );
 }
 
-function TodayView({ events, totals, goals, coverage, expanded, setExpanded, action, onCapture, saving }: { events: EatingEvent[]; totals: Nutrients; goals: Goals; coverage: number; expanded: string|null; setExpanded: (id:string|null)=>void; action:(body:Record<string,unknown>, success?:string)=>void; onCapture:()=>void; saving:boolean }) {
+function TodayView({ events, totals, goals, coverage, selectedDay, setSelectedDay, expanded, setExpanded, action, onCapture, saving }: { events: EatingEvent[]; totals: Nutrients; goals: Goals; coverage: number; selectedDay:string; setSelectedDay:(day:string)=>void; expanded: string|null; setExpanded: (id:string|null)=>void; action:(body:Record<string,unknown>, success?:string)=>void; onCapture:()=>void; saving:boolean }) {
   const progress = Math.min(100, Math.round((totals.calories / goals.calories) * 100));
+  const selectedDate = new Date(`${selectedDay}T12:00:00`);
+  const isToday = selectedDay === todayKey();
+  function moveDay(offset:number) { const next = new Date(selectedDate); next.setDate(next.getDate()+offset); setSelectedDay(next.toLocaleDateString('en-CA')); }
   return <>
-    <div className="page-heading"><div><span className="eyebrow">Today</span><h1>How today is taking shape</h1><p>Useful direction, without demanding a perfect log.</p></div><button className="primary header-capture" onClick={onCapture}>＋ Capture a meal</button></div>
+    <div className="page-heading"><div><span className="eyebrow">Journal</span><h1>{isToday ? 'How today is taking shape' : selectedDate.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'})}</h1><p>{isToday ? 'Useful direction, without demanding a perfect log.' : 'Review and refine anything you logged on this day.'}</p></div><button className="primary header-capture" onClick={onCapture}>＋ Add to this day</button></div>
+    <div className="date-navigator"><button onClick={()=>moveDay(-1)} aria-label="Previous day">‹</button><label><span>Journal date</span><input type="date" value={selectedDay} onChange={(event)=>setSelectedDay(event.target.value)} /></label><button onClick={()=>moveDay(1)} aria-label="Next day">›</button>{!isToday&&<button className="today-jump" onClick={()=>setSelectedDay(todayKey())}>Back to today</button>}</div>
     <section className="today-overview">
       <div className="energy-card"><div className="energy-copy"><span>Energy</span><strong>{round(totals.calories).toLocaleString()}</strong><small>of {goals.calories.toLocaleString()} kcal</small></div><div className="energy-ring" style={{ '--progress': `${progress * 3.6}deg` } as React.CSSProperties}><div><b>{progress}%</b><span>today</span></div></div></div>
       <div className="macro-grid">{(['protein','carbs','fat','fiber'] as const).map((key) => <Macro key={key} label={key} value={totals[key]} goal={goals[key]} />)}</div>
       <div className="trust-card"><div><span className="status-dot verified" /><strong>{coverage}% verified</strong></div><p>{events.filter((event) => event.status !== 'verified').length ? `${events.filter((event) => event.status !== 'verified').length} ${events.filter((event) => event.status !== 'verified').length === 1 ? 'meal is' : 'meals are'} still estimated.` : events.length ? 'Everything logged today has been reviewed.' : 'Log your first meal to begin.'}</p></div>
     </section>
-    <div className="section-title"><div><h2>Today’s meals</h2><span>{events.length} {events.length === 1 ? 'event' : 'events'}</span></div></div>
-    {events.length ? <div className="event-list">{events.map((event) => <EventCard key={event.id} event={event} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div> : <button className="empty-state" onClick={onCapture}><span>＋</span><strong>Nothing logged yet</strong><p>A photo, a sentence, or a quick voice note is enough.</p></button>}
+    <div className="section-title"><div><h2>{isToday ? 'Today’s meals' : 'Meals for this day'}</h2><span>{events.length} {events.length === 1 ? 'event' : 'events'}</span></div></div>
+    {events.length ? <div className="event-list">{events.map((event) => <EventCard key={`${event.id}-${event.items.map((item)=>item.id).join('-')}`} event={event} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div> : <button className="empty-state" onClick={onCapture}><span>＋</span><strong>Nothing logged on this day</strong><p>Add a meal now, or choose another date above.</p></button>}
   </>;
 }
 
@@ -161,24 +183,29 @@ function Macro({ label, value, goal }: { label:string; value:number; goal:number
 function EventCard({ event, open, onToggle, action, saving }: { event:EatingEvent; open:boolean; onToggle:()=>void; action:(body:Record<string,unknown>, success?:string)=>void; saving:boolean }) {
   const totals = eventTotals(event);
   const [items, setItems] = useState(event.items);
+  const [details, setDetails] = useState({ mealType:event.mealType, note:event.note, occurredAt:localDateTimeValue(event.occurredAt) });
   const time = new Date(event.occurredAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  function addFood() {
+    setItems((all)=>[...all,{ id:`new-${crypto.randomUUID()}`,name:'',quantity:1,unit:'serving',calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'manual',confidence:1,completeness:1 }]);
+  }
   return <article className={`event-card ${open ? 'open' : ''}`}>
     <button className="event-summary" onClick={onToggle}><div className="meal-icon">{event.mealType === 'Breakfast' ? '☼' : event.mealType === 'Dinner' ? '◐' : event.mealType === 'Snack' ? '◇' : '◒'}</div><div className="event-title"><div><strong>{event.mealType}</strong><span>{time}</span></div><p>{event.items.map((item) => item.name).join(', ') || event.note || 'Evidence captured'}</p></div><div className="event-kcal"><strong>{round(totals.calories)}</strong><span>kcal</span></div><span className={`status ${event.status}`}>{statusLabel(event.status)}</span><span className="chevron">⌄</span></button>
     {open && <div className="event-detail">
+      <div className="entry-editor"><div className="items-heading"><span className="detail-label">Entry details</span><span>Edit the date, meal, or description</span></div><div className="entry-fields"><label>Date and time<input type="datetime-local" value={details.occurredAt} onChange={(e)=>setDetails({...details,occurredAt:e.target.value})}/></label><label>Meal<select value={details.mealType} onChange={(e)=>setDetails({...details,mealType:e.target.value})}>{['Breakfast','Lunch','Dinner','Snack'].map((type)=><option key={type}>{type}</option>)}</select></label><label className="entry-note">Description<input value={details.note} onChange={(e)=>setDetails({...details,note:e.target.value})}/></label><button onClick={()=>action({action:'update_event',eventId:event.id,occurredAt:new Date(details.occurredAt).toISOString(),mealType:details.mealType,note:details.note},'Entry details updated.')}>Save details</button></div></div>
       {event.evidence.length > 0 && <div className="evidence-panel"><span className="detail-label">Original evidence</span><div className="evidence-row">{event.evidence.map((item) => item.type === 'photo' && item.url ? <a key={item.id} href={item.url} target="_blank"><img src={item.url} alt={item.filename ?? 'Meal evidence'} /></a> : <blockquote key={item.id}>{item.transcript}</blockquote>)}</div></div>}
-      <div className="items-panel"><div className="items-heading"><span className="detail-label">Structured estimate</span><span>Values update per item</span></div>{items.map((item, index) => <EditableItem key={item.id} item={item} onChange={(next) => setItems((all) => all.map((current, i) => i === index ? next : current))} onSave={(next) => action({ action:'update_item', item:next }, 'Item updated.')} />)}</div>
+      <div className="items-panel"><div className="items-heading"><span className="detail-label">Foods in this entry</span><button className="add-item" onClick={addFood}>＋ Add food</button></div>{items.map((item, index) => <EditableItem key={item.id} item={item} onChange={(next) => setItems((all) => all.map((current, i) => i === index ? next : current))} onSave={(next) => action(next.id.startsWith('new-') ? { action:'add_item',eventId:event.id,item:next } : { action:'update_item',item:next },next.id.startsWith('new-')?'Food added.':'Item updated.')} onDelete={()=>item.id.startsWith('new-')?setItems((all)=>all.filter((current)=>current.id!==item.id)):action({action:'delete_item',itemId:item.id},'Food removed.')} />)}</div>
       <div className="confidence-note"><span>≈</span><p><strong>Estimate confidence</strong><br />Portions and missing micronutrients remain visible. Missing data is never treated as zero.</p></div>
       <div className="event-actions"><button onClick={() => action({ action:'delete_event', eventId:event.id }, 'Meal deleted.')}>Delete</button><button onClick={() => action({ action:'save_event_to_library', eventId:event.id, name:event.note || `${event.mealType} meal` }, 'Saved for quick reuse.')}>Save to library</button><button onClick={() => action({ action:'repeat', eventId:event.id }, 'Meal repeated for today.')}>Repeat today</button>{event.status !== 'verified' && <button className="primary" disabled={saving} onClick={() => action({ action:'verify', eventId:event.id }, 'Meal marked verified.')}>Mark verified ✓</button>}</div>
     </div>}
   </article>;
 }
 
-function EditableItem({ item, onChange, onSave }: { item:FoodItem; onChange:(item:FoodItem)=>void; onSave:(item:FoodItem)=>void }) {
-  return <div className="editable-item"><input className="food-name" value={item.name} onChange={(e) => onChange({ ...item, name:e.target.value })} /><div className="food-fields"><label>Amount<input type="number" step="0.1" value={item.quantity} onChange={(e) => onChange({ ...item, quantity:Number(e.target.value) })} /></label><label>Unit<input value={item.unit} onChange={(e) => onChange({ ...item, unit:e.target.value })} /></label>{nutrientKeys.map((key) => <label key={key}>{key === 'calories' ? 'kcal' : key}<input type="number" step="0.1" value={item[key]} onChange={(e) => onChange({ ...item, [key]:Number(e.target.value) })} /></label>)}</div><div className="item-meta"><span>{Math.round(item.confidence*100)}% identity confidence</span><span>{Math.round(item.completeness*100)}% nutrient coverage</span><button onClick={() => onSave(item)}>Save changes</button></div></div>;
+function EditableItem({ item, onChange, onSave, onDelete }: { item:FoodItem; onChange:(item:FoodItem)=>void; onSave:(item:FoodItem)=>void; onDelete:()=>void }) {
+  return <div className="editable-item"><input className="food-name" value={item.name} onChange={(e) => onChange({ ...item, name:e.target.value })} placeholder="Food name" /><div className="food-fields"><label>Amount<input type="number" step="0.1" value={item.quantity} onChange={(e) => onChange({ ...item, quantity:Number(e.target.value) })} /></label><label>Unit<input value={item.unit} onChange={(e) => onChange({ ...item, unit:e.target.value })} /></label>{nutrientKeys.map((key) => <label key={key}>{key === 'calories' ? 'kcal' : key}<input type="number" step="0.1" value={item[key]} onChange={(e) => onChange({ ...item, [key]:Number(e.target.value) })} /></label>)}</div><div className="item-meta"><span>{Math.round(item.confidence*100)}% identity confidence</span><span>{Math.round(item.completeness*100)}% nutrient coverage</span><button className="delete-item" onClick={onDelete}>Remove</button><button onClick={() => onSave(item)}>{item.id.startsWith('new-')?'Add food':'Save changes'}</button></div></div>;
 }
 
 function ReviewView({ events, expanded, setExpanded, action, saving }: { events:EatingEvent[]; expanded:string|null; setExpanded:(id:string|null)=>void; action:(body:Record<string,unknown>,success?:string)=>void; saving:boolean }) {
-  return <><div className="page-heading"><div><span className="eyebrow">Review inbox</span><h1>Resolve what matters</h1><p>Only uncertain meals wait here. Estimates can stay estimates as long as you like.</p></div></div>{events.length ? <div className="review-banner"><span>≈</span><div><strong>{events.length} {events.length === 1 ? 'entry needs' : 'entries need'} a look</strong><p>Recent and lower-confidence entries appear first.</p></div></div> : <div className="all-clear"><span>✓</span><h2>You’re all caught up</h2><p>No captured or estimated meals need attention.</p></div>}<div className="event-list">{events.map((event) => <EventCard key={event.id} event={event} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div></>;
+  return <><div className="page-heading"><div><span className="eyebrow">Review inbox</span><h1>Resolve what matters</h1><p>Only uncertain meals wait here. Estimates can stay estimates as long as you like.</p></div></div>{events.length ? <div className="review-banner"><span>≈</span><div><strong>{events.length} {events.length === 1 ? 'entry needs' : 'entries need'} a look</strong><p>Recent and lower-confidence entries appear first.</p></div></div> : <div className="all-clear"><span>✓</span><h2>You’re all caught up</h2><p>No captured or estimated meals need attention.</p></div>}<div className="event-list">{events.map((event) => <EventCard key={`${event.id}-${event.items.map((item)=>item.id).join('-')}`} event={event} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div></>;
 }
 
 function TrendsView({ events, goals, onSave, onDeleteAll }: { events:EatingEvent[]; goals:Goals; onSave:(goals:Goals)=>void; onDeleteAll:()=>void }) {
