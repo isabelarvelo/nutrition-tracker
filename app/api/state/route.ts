@@ -39,13 +39,22 @@ async function initDb() {
     db.prepare(`CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, occurred_at TEXT NOT NULL, meal_type TEXT NOT NULL, status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, event_id TEXT NOT NULL, type TEXT NOT NULL, storage_key TEXT, filename TEXT, mime_type TEXT, transcript TEXT, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS logged_items (id TEXT PRIMARY KEY, event_id TEXT NOT NULL, name TEXT NOT NULL, quantity REAL NOT NULL, unit TEXT NOT NULL, calories REAL NOT NULL, protein REAL NOT NULL, carbs REAL NOT NULL, fat REAL NOT NULL, fiber REAL NOT NULL, iron REAL, calcium REAL, vitamin_c REAL, source TEXT NOT NULL, confidence REAL NOT NULL, completeness REAL NOT NULL)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS library_items (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, alias TEXT NOT NULL DEFAULT '', quantity REAL NOT NULL, unit TEXT NOT NULL, calories REAL NOT NULL, protein REAL NOT NULL, carbs REAL NOT NULL, fat REAL NOT NULL, fiber REAL NOT NULL, iron REAL, calcium REAL, vitamin_c REAL, created_at TEXT NOT NULL)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS library_items (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, alias TEXT NOT NULL DEFAULT '', quantity REAL NOT NULL, unit TEXT NOT NULL, calories REAL NOT NULL, protein REAL NOT NULL, carbs REAL NOT NULL, fat REAL NOT NULL, fiber REAL NOT NULL, iron REAL, calcium REAL, vitamin_c REAL, serving_grams REAL, servings_per_cooked_cup REAL, source_label TEXT NOT NULL DEFAULT '', source_url TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS goals (user_id TEXT PRIMARY KEY, calories REAL NOT NULL, protein REAL NOT NULL, carbs REAL NOT NULL, fat REAL NOT NULL, fiber REAL NOT NULL, updated_at TEXT NOT NULL)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_events_user_time ON events(user_id, occurred_at)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_evidence_event ON evidence(event_id)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_logged_items_event ON logged_items(event_id)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_library_user ON library_items(user_id)`),
   ]);
+  const libraryColumns = await db.prepare('PRAGMA table_info(library_items)').all<D1Row>();
+  const columnNames = new Set(libraryColumns.results.map((column) => String(column.name)));
+  const missingColumns = [
+    ['serving_grams', 'REAL'],
+    ['servings_per_cooked_cup', 'REAL'],
+    ['source_label', "TEXT NOT NULL DEFAULT ''"],
+    ['source_url', "TEXT NOT NULL DEFAULT ''"],
+  ].filter(([name]) => !columnNames.has(name));
+  if (missingColumns.length) await db.batch(missingColumns.map(([name, definition]) => db.prepare(`ALTER TABLE library_items ADD COLUMN ${name} ${definition}`)));
   await db.prepare('PRAGMA optimize').run();
 }
 
@@ -72,7 +81,7 @@ async function getState(userId: string) {
     items: itemsResult.results.filter((item) => item.event_id === event.id).map(mapItem),
     evidence: evidenceResult.results.filter((item) => item.event_id === event.id).map((item) => ({ id: String(item.id), type: String(item.type), transcript: item.transcript == null ? null : String(item.transcript), filename: item.filename == null ? null : String(item.filename), url: item.storage_key ? `/api/files?key=${encodeURIComponent(String(item.storage_key))}` : null })),
   }));
-  const library = libraryResult.results.map((row): LibraryItem => ({ ...mapItem({ ...row, source: 'personal', confidence: 1, completeness: .95 }), kind: String(row.kind) as LibraryItem['kind'], alias: String(row.alias) }));
+  const library = libraryResult.results.map((row): LibraryItem => ({ ...mapItem({ ...row, source: 'personal', confidence: 1, completeness: .95 }), kind: String(row.kind) as LibraryItem['kind'], alias: String(row.alias), servingGrams: row.serving_grams == null ? null : Number(row.serving_grams), servingsPerCookedCup: row.servings_per_cooked_cup == null ? null : Number(row.servings_per_cooked_cup), sourceLabel: String(row.source_label ?? ''), sourceUrl: String(row.source_url ?? '') }));
   return { events, library, goals: goal ? { calories: Number(goal.calories), protein: Number(goal.protein), carbs: Number(goal.carbs), fat: Number(goal.fat), fiber: Number(goal.fiber) } : DEFAULT_GOALS };
 }
 
@@ -84,7 +93,7 @@ function splitFoodList(text: string) {
     .filter(Boolean);
 }
 
-function parsedAmount(segment: string, fallbackQuantity: number, fallbackUnit: string) {
+function parsedAmount(segment: string, fallbackQuantity: number, fallbackUnit: string, conversion?: Pick<LibraryItem,'servingGrams'|'servingsPerCookedCup'>) {
   const numberWords: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, half: .5 };
   const match = segment.match(/^\s*(\d+(?:\.\d+)?|\d+\/\d+|a|an|one|two|half)\s*(cups?|tbsp|tablespoons?|tsp|teaspoons?|oz|ounces?|grams?|g|scoops?|slices?|large|medium|small|servings?)?\b/i);
   if (!match) {
@@ -94,6 +103,9 @@ function parsedAmount(segment: string, fallbackQuantity: number, fallbackUnit: s
   const raw = match[1].toLowerCase();
   const quantity = raw.includes('/') ? Number(raw.split('/')[0]) / Number(raw.split('/')[1]) : (numberWords[raw] ?? Number(raw));
   const unit = match[2]?.toLowerCase().replace(/tablespoons?/, 'tbsp').replace(/teaspoons?/, 'tsp').replace(/ounces?/, 'oz') ?? fallbackUnit;
+  if (/^cups?$/.test(unit) && /\bcooked\b/i.test(segment) && conversion?.servingsPerCookedCup) return { quantity, unit: 'cup cooked', scale: quantity * conversion.servingsPerCookedCup };
+  if (/^(?:g|grams?)$/.test(unit) && conversion?.servingGrams) return { quantity, unit: 'g', scale: quantity / conversion.servingGrams };
+  if (unit === 'oz' && conversion?.servingGrams) return { quantity, unit: 'oz', scale: quantity * 28.3495 / conversion.servingGrams };
   const compatible = unit.replace(/s$/, '') === fallbackUnit.replace(/s$/, '');
   return { quantity, unit, scale: compatible ? quantity / fallbackQuantity : 1 };
 }
@@ -124,9 +136,9 @@ function interpretedItems(text: string, library: LibraryItem[], hasPhoto: boolea
   const segments = splitFoodList(text);
   const items = segments.map((segment): FoodItem => {
     const lower = segment.toLowerCase();
-    const saved = library.find((item) => [item.name, item.alias].filter(Boolean).some((term) => lower.includes(term.toLowerCase())));
+    const saved = library.map((item) => ({ item, match: [item.name, ...item.alias.split(',')].map((term)=>term.trim()).filter(Boolean).filter((term) => lower.includes(term.toLowerCase())).sort((a,b)=>b.length-a.length)[0] ?? '' })).filter(({match})=>match).sort((a,b)=>b.match.length-a.match.length)[0]?.item;
     if (saved) {
-      const amount = parsedAmount(segment, saved.quantity, saved.unit);
+      const amount = parsedAmount(segment, saved.quantity, saved.unit, saved);
       return { ...saved, id: crypto.randomUUID(), quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(saved, amount.scale), source: 'personal library', confidence: .96, completeness: .95 };
     }
     const food = catalog.find((item) => item.terms.some((term) => lower.includes(term)));
@@ -218,13 +230,15 @@ export async function POST(request: Request) {
     await insertItems(id, sourceItems.results.map((row) => ({ ...mapItem(row), id: crypto.randomUUID() })));
   } else if (action === 'save_library') {
     const item = body.item as LibraryItem; const now = new Date().toISOString();
-    await env.DB.prepare(`INSERT INTO library_items (id,user_id,name,kind,alias,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.userId,item.name,item.kind,item.alias,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,now).run();
+    await env.DB.prepare(`INSERT INTO library_items (id,user_id,name,kind,alias,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,serving_grams,servings_per_cooked_cup,source_label,source_url,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.userId,item.name,item.kind,item.alias,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,item.servingGrams ?? null,item.servingsPerCookedCup ?? null,item.sourceLabel ?? '',item.sourceUrl ?? '',now).run();
+  } else if (action === 'delete_library') {
+    await env.DB.prepare('DELETE FROM library_items WHERE id = ? AND user_id = ?').bind(String(body.itemId),user.userId).run();
   } else if (action === 'save_event_to_library' && await ownedEvent(String(body.eventId))) {
     const event = await env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(body.eventId).first<D1Row>();
     const rows = await env.DB.prepare('SELECT * FROM logged_items WHERE event_id = ?').bind(body.eventId).all<D1Row>();
     const totals = rows.results.map(mapItem).reduce((sum, item) => ({ calories: sum.calories+item.calories, protein: sum.protein+item.protein, carbs: sum.carbs+item.carbs, fat: sum.fat+item.fat, fiber: sum.fiber+item.fiber, iron: (sum.iron??0)+(item.iron??0), calcium: (sum.calcium??0)+(item.calcium??0), vitaminC: (sum.vitaminC??0)+(item.vitaminC??0) }), { calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:0,calcium:0,vitaminC:0 });
     const name = String(body.name ?? event?.note ?? 'Saved meal');
-    await env.DB.prepare(`INSERT INTO library_items (id,user_id,name,kind,alias,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.userId,name,'meal',name.toLowerCase(),1,'meal',totals.calories,totals.protein,totals.carbs,totals.fat,totals.fiber,totals.iron,totals.calcium,totals.vitaminC,new Date().toISOString()).run();
+    await env.DB.prepare(`INSERT INTO library_items (id,user_id,name,kind,alias,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,serving_grams,servings_per_cooked_cup,source_label,source_url,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.userId,name,'meal',name.toLowerCase(),1,'meal',totals.calories,totals.protein,totals.carbs,totals.fat,totals.fiber,totals.iron,totals.calcium,totals.vitaminC,null,null,'Personal meal','',new Date().toISOString()).run();
   } else if (action === 'save_goals') {
     const goals = body.goals as Goals;
     await env.DB.prepare(`INSERT INTO goals (user_id,calories,protein,carbs,fat,fiber,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET calories=excluded.calories,protein=excluded.protein,carbs=excluded.carbs,fat=excluded.fat,fiber=excluded.fiber,updated_at=excluded.updated_at`).bind(user.userId,goals.calories,goals.protein,goals.carbs,goals.fat,goals.fiber,new Date().toISOString()).run();

@@ -45,6 +45,10 @@ export type LibraryItem = Nutrients & {
   alias: string;
   quantity: number;
   unit: string;
+  servingGrams: number | null;
+  servingsPerCookedCup: number | null;
+  sourceLabel: string;
+  sourceUrl: string;
 };
 
 export type Goals = {
