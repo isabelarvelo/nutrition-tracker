@@ -9,7 +9,7 @@ export const evidence = sqliteTable('evidence', {
 }, (table) => [index('idx_evidence_event').on(table.eventId)]);
 
 export const loggedItems = sqliteTable('logged_items', {
-  id: text('id').primaryKey(), eventId: text('event_id').notNull(), name: text('name').notNull(), quantity: real('quantity').notNull(), unit: text('unit').notNull(), calories: real('calories').notNull(), protein: real('protein').notNull(), carbs: real('carbs').notNull(), fat: real('fat').notNull(), fiber: real('fiber').notNull(), iron: real('iron'), calcium: real('calcium'), vitaminC: real('vitamin_c'), source: text('source').notNull(), confidence: real('confidence').notNull(), completeness: real('completeness').notNull(),
+  id: text('id').primaryKey(), eventId: text('event_id').notNull(), name: text('name').notNull(), quantity: real('quantity').notNull(), unit: text('unit').notNull(), calories: real('calories').notNull(), protein: real('protein').notNull(), carbs: real('carbs').notNull(), fat: real('fat').notNull(), fiber: real('fiber').notNull(), iron: real('iron'), calcium: real('calcium'), vitaminC: real('vitamin_c'), source: text('source').notNull(), sourceUrl: text('source_url').notNull().default(''), libraryItemId: text('library_item_id'), confidence: real('confidence').notNull(), completeness: real('completeness').notNull(),
 }, (table) => [index('idx_logged_items_event').on(table.eventId)]);
 
 export const libraryItems = sqliteTable('library_items', {

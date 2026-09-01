@@ -15,6 +15,8 @@ export type FoodItem = Nutrients & {
   quantity: number;
   unit: string;
   source: string;
+  sourceUrl: string;
+  libraryItemId: string | null;
   confidence: number;
   completeness: number;
 };
