@@ -17,5 +17,5 @@ export const libraryItems = sqliteTable('library_items', {
 }, (table) => [index('idx_library_user').on(table.userId)]);
 
 export const goals = sqliteTable('goals', {
-  userId: text('user_id').primaryKey(), calories: real('calories').notNull(), protein: real('protein').notNull(), carbs: real('carbs').notNull(), fat: real('fat').notNull(), fiber: real('fiber').notNull(), updatedAt: text('updated_at').notNull(),
+  userId: text('user_id').primaryKey(), calories: real('calories').notNull(), protein: real('protein').notNull(), carbs: real('carbs').notNull(), fat: real('fat').notNull(), fiber: real('fiber').notNull(), breakfastTime: text('breakfast_time').notNull().default('08:00'), lunchTime: text('lunch_time').notNull().default('12:30'), dinnerTime: text('dinner_time').notNull().default('18:30'), snackTime: text('snack_time').notNull().default('15:30'), updatedAt: text('updated_at').notNull(),
 });

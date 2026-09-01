@@ -2,12 +2,12 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AppState, EatingEvent, FoodItem, Goals, LibraryItem, Nutrients } from './types';
+import type { AppState, EatingEvent, FoodItem, Goals, LibraryItem, MealTimes, Nutrients } from './types';
 import { emptyNutrients } from './types';
 
 type View = 'today' | 'review' | 'trends' | 'library';
 type FoodResearchResult = Nutrients & { id:string;name:string;brand:string;description:string;serving:string;servingGrams:number|null;servingsPerCookedCup:number|null;sourceLabel:string;sourceUrl:string };
-const initial: AppState = { events: [], library: [], goals: { calories: 2100, protein: 115, carbs: 240, fat: 70, fiber: 28 }, user: { displayName: 'Food journal', email: '' } };
+const initial: AppState = { events: [], library: [], goals: { calories: 2100, protein: 115, carbs: 240, fat: 70, fiber: 28 }, mealTimes:{ Breakfast:'08:00', Lunch:'12:30', Dinner:'18:30', Snack:'15:30' }, user: { displayName: 'Food journal', email: '' } };
 const nutrientKeys: Array<keyof Pick<Nutrients, 'calories'|'protein'|'carbs'|'fat'|'fiber'>> = ['calories','protein','carbs','fat','fiber'];
 
 function dayKey(value: string) { return new Date(value).toLocaleDateString('en-CA'); }
@@ -17,10 +17,7 @@ function localDateTimeValue(value: string | Date) {
   const pad = (part: number) => String(part).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
-function captureTimeForDay(day: string) {
-  const now = new Date();
-  return `${day}T${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-}
+function captureTimeForDay(day: string, time:string) { return `${day}T${time}`; }
 function sumItems(items: FoodItem[]): Nutrients {
   return items.reduce((sum, item) => ({
     calories: sum.calories + item.calories, protein: sum.protein + item.protein, carbs: sum.carbs + item.carbs,
@@ -106,8 +103,13 @@ export default function MiseApp() {
   }
 
   function openCapture(day = selectedDay) {
-    setCaptureDate(captureTimeForDay(day));
+    setCaptureDate(captureTimeForDay(day,state.mealTimes[mealType as keyof MealTimes]));
     setCaptureOpen(true);
+  }
+
+  function selectMealType(type:keyof MealTimes) {
+    setMealType(type);
+    setCaptureDate(captureTimeForDay(captureDate.slice(0,10)||selectedDay,state.mealTimes[type]));
   }
 
   function exportData() {
@@ -127,26 +129,26 @@ export default function MiseApp() {
       <div className="desktop-grid">
         <nav className="side-nav" aria-label="Primary navigation">
           <div className="nav-date"><strong>{new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</strong><span>{new Date().toLocaleDateString('en-US', { weekday: 'long' })}</span></div>
-          {([['today','Journal','⌂'],['review','Review','◌'],['trends','Trends','↗'],['library','Library','◇']] as const).map(([id,label,icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><span>{icon}</span>{label}{id === 'review' && reviewEvents.length > 0 && <em>{reviewEvents.length}</em>}</button>)}
+          {([['today','Journal','⌂'],['review','Review','◌'],['trends','Profile','↗'],['library','Library','◇']] as const).map(([id,label,icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><span>{icon}</span>{label}{id === 'review' && reviewEvents.length > 0 && <em>{reviewEvents.length}</em>}</button>)}
           <div className="side-note"><span>Private by design</span><p>Your photos and food records are only available to you.</p></div>
         </nav>
 
         <section className="main-content">
           {view === 'today' && <TodayView events={selectedEvents} library={state.library} totals={selectedTotals} goals={state.goals} coverage={coverage} selectedDay={selectedDay} setSelectedDay={setSelectedDay} expanded={expanded} setExpanded={setExpanded} action={action} onCapture={() => openCapture()} saving={saving} />}
           {view === 'review' && <ReviewView events={reviewEvents} library={state.library} expanded={expanded} setExpanded={setExpanded} action={action} saving={saving} />}
-          {view === 'trends' && <TrendsView events={state.events} goals={state.goals} onSave={(goals) => action({ action: 'save_goals', goals }, 'Goals updated.')} onDeleteAll={() => { if (window.confirm('Permanently delete every meal, photo, saved food, and goal? This cannot be undone.')) action({ action:'delete_all' }, 'All food-tracking data was deleted.'); }} />}
+          {view === 'trends' && <TrendsView events={state.events} goals={state.goals} mealTimes={state.mealTimes} onSave={(goals,mealTimes) => action({ action: 'save_goals', goals, mealTimes }, 'Profile updated.')} onDeleteAll={() => { if (window.confirm('Permanently delete every meal, photo, saved food, and goal? This cannot be undone.')) action({ action:'delete_all' }, 'All food-tracking data was deleted.'); }} />}
           {view === 'library' && <LibraryView items={state.library} onSave={(item) => action({ action: 'save_library', item }, 'Added to your library.')} onDelete={(itemId)=>action({action:'delete_library',itemId},'Removed from your library.')} saving={saving} />}
         </section>
       </div>
 
       <nav className="mobile-nav" aria-label="Primary navigation">
-        {([['today','Journal','⌂'],['review','Review','◌'],['trends','Trends','↗'],['library','Library','◇']] as const).map(([id,label,icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><span>{icon}</span>{label}</button>)}
+        {([['today','Journal','⌂'],['review','Review','◌'],['trends','Profile','↗'],['library','Library','◇']] as const).map(([id,label,icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><span>{icon}</span>{label}</button>)}
       </nav>
       <button className="mobile-capture" onClick={() => openCapture()} aria-label="Capture a meal">＋</button>
 
       {captureOpen && <div className="modal-backdrop" onMouseDown={() => !saving && setCaptureOpen(false)}><section className="capture-sheet" onMouseDown={(event) => event.stopPropagation()} aria-modal="true" role="dialog" aria-labelledby="capture-title">
         <div className="sheet-handle" /><div className="capture-head"><div><span className="eyebrow">Quick capture</span><h2 id="capture-title">What did you have?</h2></div><button className="close-button" onClick={() => setCaptureOpen(false)}>×</button></div>
-        <div className="meal-types">{['Breakfast','Lunch','Dinner','Snack'].map((type) => <button key={type} onClick={() => setMealType(type)} className={mealType === type ? 'selected' : ''}>{type}</button>)}</div>
+        <div className="meal-types">{(['Breakfast','Lunch','Dinner','Snack'] as Array<keyof MealTimes>).map((type) => <button key={type} onClick={() => selectMealType(type)} className={mealType === type ? 'selected' : ''}>{type}</button>)}</div>
         <label className="capture-date">Date and time<input type="datetime-local" value={captureDate} onChange={(event) => setCaptureDate(event.target.value)} /></label>
         <textarea className="capture-input" value={note} onChange={(event) => setNote(event.target.value)} placeholder='Try “1 cup pasta, 2 eggs, parmesan, and 1 cup cold brew”' autoFocus />
         <p className="capture-hint">Separate foods with commas or “and” and Mise will create an item for each one.</p>
@@ -211,12 +213,13 @@ function ReviewView({ events, library, expanded, setExpanded, action, saving }: 
   return <><div className="page-heading"><div><span className="eyebrow">Review inbox</span><h1>Resolve what matters</h1><p>Only uncertain meals wait here. Estimates can stay estimates as long as you like.</p></div></div>{events.length ? <div className="review-banner"><span>≈</span><div><strong>{events.length} {events.length === 1 ? 'entry needs' : 'entries need'} a look</strong><p>Recent entries and foods without a reliable source appear here.</p></div></div> : <div className="all-clear"><span>✓</span><h2>You’re all caught up</h2><p>No captured or estimated meals need attention.</p></div>}<div className="event-list">{events.map((event) => <EventCard key={`${event.id}-${event.items.map((item)=>item.id).join('-')}`} event={event} library={library} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div></>;
 }
 
-function TrendsView({ events, goals, onSave, onDeleteAll }: { events:EatingEvent[]; goals:Goals; onSave:(goals:Goals)=>void; onDeleteAll:()=>void }) {
+function TrendsView({ events, goals, mealTimes, onSave, onDeleteAll }: { events:EatingEvent[]; goals:Goals; mealTimes:MealTimes; onSave:(goals:Goals,mealTimes:MealTimes)=>void; onDeleteAll:()=>void }) {
   const [draft, setDraft] = useState(goals);
+  const [timeDraft,setTimeDraft]=useState(mealTimes);
   const days = Array.from({ length:7 }, (_, index) => { const date = new Date(); date.setDate(date.getDate() - (6-index)); const key = date.toLocaleDateString('en-CA'); const dayEvents = events.filter((event) => dayKey(event.occurredAt) === key); return { label:date.toLocaleDateString('en-US',{weekday:'short'}).slice(0,1), totals:sumItems(dayEvents.flatMap((event)=>event.items)), events:dayEvents }; });
   const avg = sumItems(days.flatMap((day) => day.events.flatMap((event) => event.items))); nutrientKeys.forEach((key) => { avg[key] /= 7; });
   const verified = events.filter((event) => event.status === 'verified').length; const completeness = events.length ? Math.round(events.flatMap((e)=>e.items).reduce((s,i)=>s+i.completeness,0)/Math.max(1,events.flatMap((e)=>e.items).length)*100) : 0;
-  return <><div className="page-heading"><div><span className="eyebrow">Last 7 days</span><h1>Patterns, not perfection</h1><p>Averages include unlogged days so gaps remain honest.</p></div></div><div className="trend-grid"><section className="chart-card"><div className="chart-head"><div><span>Daily energy</span><strong>{round(avg.calories).toLocaleString()} <small>kcal avg</small></strong></div><span className="soft-pill">7 days</span></div><div className="bar-chart">{days.map((day,index) => <div key={index} className="bar-column"><div className="bar-track"><i style={{ height:`${Math.min(100,(day.totals.calories/goals.calories)*100)}%` }} /></div><span>{day.label}</span></div>)}</div><div className="goal-line"><i />Goal: {goals.calories.toLocaleString()} kcal</div></section><section className="quality-card"><span className="detail-label">Data quality</span><Quality value={events.length ? Math.round((verified/events.length)*100) : 0} label="Events verified" color="#2e7451" /><Quality value={completeness} label="Nutrient coverage" color="#e4a943" /><p>Coverage reflects whether nutrient values are known—not whether your intake is “good.”</p></section></div><section className="averages-card"><div className="section-title"><div><h2>Daily averages</h2><span>Across the last week</span></div></div><div className="average-grid">{(['protein','carbs','fat','fiber'] as const).map((key)=><div key={key}><span>{key}</span><strong>{round(avg[key])}g</strong><small>{Math.round((avg[key]/goals[key])*100)}% of target</small></div>)}</div></section><section className="goals-card"><div><span className="eyebrow">Manual targets</span><h2>Your guide rails</h2><p>These stay put until you choose to change them.</p></div><div className="goal-fields">{nutrientKeys.map((key)=><label key={key}>{key}<span><input type="number" value={draft[key]} onChange={(e)=>setDraft({...draft,[key]:Number(e.target.value)})}/>{key==='calories'?'kcal':'g'}</span></label>)}<button className="primary" onClick={()=>onSave(draft)}>Save targets</button></div></section><section className="data-card"><div><span className="eyebrow">Data control</span><h2>Your journal belongs to you</h2><p>Use the download button in the header for a complete JSON export. Original photos remain available from each meal.</p></div><button onClick={onDeleteAll}>Delete all my data</button></section></>;
+  return <><div className="page-heading"><div><span className="eyebrow">Profile & last 7 days</span><h1>Your patterns and defaults</h1><p>Set your goals and usual meal times, then see how the week is taking shape.</p></div></div><section className="goals-card profile-card"><div><span className="eyebrow">Your profile</span><h2>Goals & meal rhythm</h2><p>Choosing a meal during capture will start at its usual time. You can still adjust it for any entry.</p></div><div className="profile-fields"><div className="goal-fields">{nutrientKeys.map((key)=><label key={key}>{key}<span><input type="number" value={draft[key]} onChange={(e)=>setDraft({...draft,[key]:Number(e.target.value)})}/>{key==='calories'?'kcal':'g'}</span></label>)}</div><div className="meal-defaults"><strong>Usual meal times</strong><div className="meal-time-grid">{(Object.keys(timeDraft) as Array<keyof MealTimes>).map((type)=><label key={type}>{type}<input type="time" value={timeDraft[type]} onChange={(event)=>setTimeDraft({...timeDraft,[type]:event.target.value})}/></label>)}</div></div><button className="primary profile-save" onClick={()=>onSave(draft,timeDraft)}>Save profile</button></div></section><div className="trend-grid"><section className="chart-card"><div className="chart-head"><div><span>Daily energy</span><strong>{round(avg.calories).toLocaleString()} <small>kcal avg</small></strong></div><span className="soft-pill">7 days</span></div><div className="bar-chart">{days.map((day,index) => <div key={index} className="bar-column"><div className="bar-track"><i style={{ height:`${Math.min(100,(day.totals.calories/goals.calories)*100)}%` }} /></div><span>{day.label}</span></div>)}</div><div className="goal-line"><i />Goal: {goals.calories.toLocaleString()} kcal</div></section><section className="quality-card"><span className="detail-label">Data quality</span><Quality value={events.length ? Math.round((verified/events.length)*100) : 0} label="Events verified" color="#2e7451" /><Quality value={completeness} label="Nutrient coverage" color="#e4a943" /><p>Coverage reflects whether nutrient values are known—not whether your intake is “good.”</p></section></div><section className="averages-card"><div className="section-title"><div><h2>Daily averages</h2><span>Across the last week</span></div></div><div className="average-grid">{(['protein','carbs','fat','fiber'] as const).map((key)=><div key={key}><span>{key}</span><strong>{round(avg[key])}g</strong><small>{Math.round((avg[key]/goals[key])*100)}% of target</small></div>)}</div></section><section className="data-card"><div><span className="eyebrow">Data control</span><h2>Your journal belongs to you</h2><p>Use the download button in the header for a complete JSON export. Original photos remain available from each meal.</p></div><button onClick={onDeleteAll}>Delete all my data</button></section></>;
 }
 function Quality({ value,label,color }:{value:number;label:string;color:string}) { return <div className="quality"><div><span>{label}</span><strong>{value}%</strong></div><div className="progress"><i style={{width:`${value}%`,background:color}} /></div></div>; }
 

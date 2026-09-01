@@ -61,10 +61,18 @@ export type Goals = {
   fiber: number;
 };
 
+export type MealTimes = {
+  Breakfast: string;
+  Lunch: string;
+  Dinner: string;
+  Snack: string;
+};
+
 export type AppState = {
   events: EatingEvent[];
   library: LibraryItem[];
   goals: Goals;
+  mealTimes: MealTimes;
   user: { displayName: string; email: string };
 };
 
