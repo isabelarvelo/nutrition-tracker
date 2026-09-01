@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { getChatGPTUser } from '../../chatgpt-auth';
 import type { FoodItem, Goals, LibraryItem, MealTimes, Nutrients } from '../../types';
-import { researchFoods } from '../../food-research';
+import { researchFoods, researchOpenFoodFacts, type FoodResearchResult } from '../../food-research';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,7 +16,7 @@ const catalog: Array<{ terms: string[]; name: string; quantity: number; unit: st
   { terms: ['banana'], name: 'Banana', quantity: 1, unit: 'medium', nutrients: { calories: 105, protein: 1.3, carbs: 27, fat: .4, fiber: 3.1, iron: .3, calcium: 6, vitaminC: 10.3 } },
   { terms: ['almond butter'], name: 'Almond butter', quantity: 1, unit: 'tbsp', nutrients: { calories: 98, protein: 3.4, carbs: 3, fat: 9, fiber: 1.6, iron: .6, calcium: 56, vitaminC: 0 } },
   { terms: ['orgain', 'protein powder', 'protein scoop'], name: 'Vanilla protein powder', quantity: 1, unit: 'scoop', nutrients: { calories: 150, protein: 21, carbs: 15, fat: 4, fiber: 2, iron: 4.5, calcium: 50, vitaminC: 0 } },
-  { terms: ['egg', 'eggs'], name: 'Eggs', quantity: 2, unit: 'large', nutrients: { calories: 144, protein: 12.6, carbs: .7, fat: 9.5, fiber: 0, iron: 1.8, calcium: 56, vitaminC: 0 } },
+  { terms: ['egg', 'eggs'], name: 'Egg', quantity: 1, unit: 'large', nutrients: { calories: 72, protein: 6.3, carbs: .35, fat: 4.75, fiber: 0, iron: .9, calcium: 28, vitaminC: 0 } },
   { terms: ['toast', 'bread'], name: 'Whole-grain toast', quantity: 1, unit: 'slice', nutrients: { calories: 100, protein: 4, carbs: 18, fat: 1.5, fiber: 3, iron: 1.1, calcium: 40, vitaminC: 0 } },
   { terms: ['yogurt'], name: 'Greek yogurt', quantity: 1, unit: 'cup', nutrients: { calories: 130, protein: 23, carbs: 9, fat: 0, fiber: 0, iron: .2, calcium: 250, vitaminC: 0 } },
   { terms: ['chicken'], name: 'Roasted chicken breast', quantity: 4, unit: 'oz', nutrients: { calories: 187, protein: 35, carbs: 0, fat: 4, fiber: 0, iron: 1.1, calcium: 17, vitaminC: 0 } },
@@ -25,6 +25,10 @@ const catalog: Array<{ terms: string[]; name: string; quantity: number; unit: st
   { terms: ['salmon'], name: 'Baked salmon', quantity: 5, unit: 'oz', nutrients: { calories: 295, protein: 31, carbs: 0, fat: 18, fiber: 0, iron: .7, calcium: 18, vitaminC: 0 } },
   { terms: ['coffee'], name: 'Coffee with milk', quantity: 1, unit: 'cup', nutrients: { calories: 35, protein: 2, carbs: 3, fat: 1.5, fiber: 0, iron: 0, calcium: 75, vitaminC: 0 } },
   { terms: ['parmesan cheese', 'parmesan'], name: 'Parmesan cheese', quantity: 1, unit: 'sprinkle', nutrients: { calories: 22, protein: 2, carbs: .2, fat: 1.4, fiber: 0, iron: 0, calcium: 65, vitaminC: 0 } },
+  { terms:['einkorn berries','einkorn berry','einkorn'],name:'Cooked einkorn berries',quantity:1,unit:'cup cooked',nutrients:{calories:250,protein:9,carbs:52,fat:1.7,fiber:8,iron:2.7,calcium:20,vitaminC:0} },
+  { terms:['pesto'],name:'Basil pesto',quantity:1,unit:'tbsp',nutrients:{calories:80,protein:1,carbs:1,fat:8,fiber:.3,iron:.4,calcium:20,vitaminC:.5} },
+  { terms:['grape','grapes'],name:'Grapes',quantity:1,unit:'cup',nutrients:{calories:104,protein:1.1,carbs:27.3,fat:.2,fiber:1.4,iron:.5,calcium:15,vitaminC:4.8} },
+  { terms:['avocado','avocados'],name:'Avocado',quantity:1,unit:'medium',nutrients:{calories:322,protein:4,carbs:17.1,fat:29.5,fiber:13.5,iron:1.1,calcium:24,vitaminC:20.1} },
 ];
 
 async function identity() {
@@ -103,20 +107,21 @@ function splitFoodList(text: string) {
     .filter(Boolean);
 }
 
-function parsedAmount(segment: string, fallbackQuantity: number, fallbackUnit: string, conversion?: Pick<LibraryItem,'servingGrams'|'servingsPerCookedCup'>) {
+function parsedAmount(segment: string, fallbackQuantity: number, fallbackUnit: string, conversion?: {servingGrams:number|null;servingsPerCookedCup:number|null;unitGrams?:Record<string,number>}) {
   const numberWords: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, half: .5 };
-  const match = segment.match(/^\s*(\d+\/\d+|\d+(?:\.\d+)?|a|an|one|two|half)\s*(cups?|tbsp|tablespoons?|tsp|teaspoons?|oz|ounces?|grams?|g|scoops?|slices?|large|medium|small|servings?)?\b/i);
+  const match = segment.match(/^\s*(\d+\/\d+|\d+(?:\.\d+)?|a|an|one|two|half)\s+(?:(?:a|an)\s+)?(cups?|tbsp|tablespoons?|tsp|teaspoons?|oz|ounces?|grams?|g|scoops?|slices?|large|medium|small|bars?|servings?)?\b/i);
   if (!match) {
     if (/^\s*sprinkle\b/i.test(segment)) return { quantity: 1, unit: 'sprinkle', scale: fallbackUnit === 'sprinkle' ? 1 : .25 };
     return { quantity: fallbackQuantity, unit: fallbackUnit, scale: 1 };
   }
   const raw = match[1].toLowerCase();
   const quantity = raw.includes('/') ? Number(raw.split('/')[0]) / Number(raw.split('/')[1]) : (numberWords[raw] ?? Number(raw));
-  const unit = match[2]?.toLowerCase().replace(/tablespoons?/, 'tbsp').replace(/teaspoons?/, 'tsp').replace(/ounces?/, 'oz') ?? fallbackUnit;
+  const unit = match[2]?.toLowerCase().replace(/tablespoons?/, 'tbsp').replace(/teaspoons?/, 'tsp').replace(/ounces?/, 'oz').replace(/bars?/,'bar') ?? fallbackUnit;
   if (/^cups?$/.test(unit) && /\bcooked\b/i.test(segment) && conversion?.servingsPerCookedCup) return { quantity, unit: 'cup cooked', scale: quantity * conversion.servingsPerCookedCup };
+  if(conversion?.servingGrams&&conversion.unitGrams?.[unit])return{quantity,unit,scale:quantity*conversion.unitGrams[unit]/conversion.servingGrams};
   if (/^(?:g|grams?)$/.test(unit) && conversion?.servingGrams) return { quantity, unit: 'g', scale: quantity / conversion.servingGrams };
   if (unit === 'oz' && conversion?.servingGrams) return { quantity, unit: 'oz', scale: quantity * 28.3495 / conversion.servingGrams };
-  const compatible = unit.replace(/s$/, '') === fallbackUnit.replace(/s$/, '');
+  const compatible = unit.replace(/s$/, '') === fallbackUnit.replace(/s$/, '').replace(/\s+cooked$/,'');
   return { quantity, unit, scale: compatible ? quantity / fallbackQuantity : 1 };
 }
 
@@ -135,35 +140,49 @@ function scaleNutrients(nutrients: Nutrients, scale: number): Nutrients {
 
 function cleanFoodName(segment: string) {
   const name = segment
-    .replace(/^\s*(?:\d+\/\d+|\d+(?:\.\d+)?|a|an|one|two|half)\s*/i, '')
+    .replace(/^\s*(?:\d+\/\d+|\d+(?:\.\d+)?|a|an|one|two|half)\s+(?:(?:a|an)\s+)?/i, '')
     .replace(/^(?:cups?|tbsp|tablespoons?|tsp|teaspoons?|oz|ounces?|grams?|g|scoops?|slices?|large|medium|small|servings?)\s+(?:of\s+)?/i, '')
     .replace(/^(?:sprinkle|dash|handful)\s+(?:of\s+)?/i, '')
     .trim();
   return name ? name[0].toUpperCase() + name.slice(1) : 'Food item';
 }
 
+function canApplyServing(segment:string,result:FoodResearchResult){
+  const entered=segment.match(/^\s*(?:\d+\/\d+|\d+(?:\.\d+)?|a|an|one|two|half)\s+(?:(?:a|an)\s+)?(cups?|tbsp|tablespoons?|tsp|teaspoons?|oz|ounces?|grams?|g|scoops?|slices?|large|medium|small|bars?|servings?)?\b/i)?.[1];
+  if(!entered)return result.servingUnit!=='g';
+  const unit=entered.toLowerCase().replace(/tablespoons?/,'tbsp').replace(/teaspoons?/,'tsp').replace(/ounces?/,'oz').replace(/cups?/,'cup').replace(/bars?/,'bar').replace(/slices?/,'slice').replace(/servings?/,'serving');
+  const base=result.servingUnit.replace(/s$/,'');if(unit.replace(/s$/,'')===base)return true;
+  if((unit==='g'||unit==='oz')&&result.servingGrams)return true;
+  if(unit==='cup'&&/\bcooked\b/i.test(segment)&&result.servingsPerCookedCup)return true;
+  return Boolean(result.servingGrams&&result.unitGrams[unit]);
+}
+
 async function interpretedItems(text: string, library: LibraryItem[], hasPhoto: boolean): Promise<FoodItem[]> {
   const segments = splitFoodList(text);
   const runtime=env as unknown as Record<string,unknown>;const apiKey=String(runtime.USDA_API_KEY||'DEMO_KEY');
-  const items = await Promise.all(segments.map(async(segment): Promise<FoodItem> => {
+  const items:FoodItem[]=[];
+  const fromResearch=(segment:string,result:FoodResearchResult,confidence:number):FoodItem=>{
+    const amount=parsedAmount(segment,result.servingQuantity,result.servingUnit,result);const known=5+[result.iron,result.calcium,result.vitaminC].filter((value)=>value!=null).length;
+    return{id:crypto.randomUUID(),name:result.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(result,amount.scale),source:result.sourceLabel,sourceUrl:result.sourceUrl,libraryItemId:null,confidence,completeness:known/8};
+  };
+  for(const segment of segments){
     const lower = segment.toLowerCase();
     const saved = library.map((item) => ({ item, match: [item.name, ...item.alias.split(',')].map((term)=>term.trim()).filter(Boolean).filter((term) => lower.includes(term.toLowerCase())).sort((a,b)=>b.length-a.length)[0] ?? '' })).filter(({match})=>match).sort((a,b)=>b.match.length-a.match.length)[0]?.item;
     if (saved) {
       const amount = parsedAmount(segment, saved.quantity, saved.unit, saved);
-      return { ...saved, id: crypto.randomUUID(), quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(saved, amount.scale), source: 'Personal Library', sourceUrl:saved.sourceUrl, libraryItemId:saved.id, confidence: 1, completeness: .95 };
-    }
-    const normalizedQuery=cleanFoodName(segment).toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
-    const food = catalog.find((item) => item.terms.some((term) => item.exact?normalizedQuery===term:lower.includes(term)));
-    if (food) {
-      const amount = parsedAmount(segment, food.quantity, food.unit);
-      return { id: crypto.randomUUID(), name: food.name, quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(food.nutrients, amount.scale), source: food.sourceLabel??'Built-in reference', sourceUrl:food.sourceUrl??'', libraryItemId:null, confidence: 1, completeness: .86 };
+      items.push({ ...saved, id: crypto.randomUUID(), quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(saved, amount.scale), source: 'Personal Library', sourceUrl:saved.sourceUrl, libraryItemId:saved.id, confidence: 1, completeness: .95 });continue;
     }
     const query=cleanFoodName(segment);
-    try{const branded=await researchFoods(query,apiKey,true,3);let result=branded.results.find((candidate)=>candidate.matchScore>=6&&candidate.calories>0);if(!result){const general=await researchFoods(query,apiKey,false,3);result=general.results.find((candidate)=>candidate.matchScore>=6&&candidate.calories>0);}if(result){const amount=parsedAmount(segment,1,result.serving,{servingGrams:result.servingGrams,servingsPerCookedCup:result.servingsPerCookedCup});const known=5+[result.iron,result.calcium,result.vitaminC].filter((value)=>value!=null).length;return{id:crypto.randomUUID(),name:result.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(result,amount.scale),source:result.sourceLabel,sourceUrl:result.sourceUrl,libraryItemId:null,confidence:1,completeness:known/8};}}
-    catch{/* Preserve the entry for review instead of inventing nutrition values. */}
+    try{const researched=await researchFoods(query,apiKey,false,8);const result=researched.results.find((candidate)=>candidate.matchScore>=5&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push(fromResearch(segment,result,.95));continue;}}
+    catch(error){console.warn('USDA food resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
+    try{const webResults=await researchOpenFoodFacts(query,6);const result=webResults.find((candidate)=>candidate.matchScore>=10&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push(fromResearch(segment,result,.86));continue;}}
+    catch(error){console.warn('Open Food Facts resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
+    const normalizedQuery=query.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
+    const food=catalog.find((item)=>item.terms.some((term)=>item.exact?normalizedQuery===term:normalizedQuery.includes(term)));
+    if(food){const amount=parsedAmount(segment,food.quantity,food.unit);items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:Boolean(food.sourceLabel?.startsWith('USDA'))?0.9:0.72,completeness:.86});continue;}
     const amount=parsedAmount(segment,1,'serving');
-    return{id:crypto.randomUUID(),name:query,quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0};
-  }));
+    items.push({id:crypto.randomUUID(),name:query,quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0});
+  }
   if (!items.length && hasPhoto) items.push({ id: crypto.randomUUID(), name: 'Meal from photo', quantity: 1, unit: 'serving', calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, iron: null, calcium: null, vitaminC: null, source: 'Photo evidence · needs review', sourceUrl:'', libraryItemId:null, confidence: 0, completeness: 0 });
   return items;
 }
