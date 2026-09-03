@@ -1,12 +1,12 @@
 import { env } from 'cloudflare:workers';
-import { getChatGPTUser } from '../../chatgpt-auth';
+import { requireUser } from '../../lib/auth';
 import { researchFoods } from '../../food-research';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request:Request){
-  const user=await getChatGPTUser();
-  if(!user&&process.env.NODE_ENV==='production')return Response.json({error:'Authentication required'},{status:401});
+  const user=await requireUser();
+  if(!user)return Response.json({error:'Authentication required'},{status:401});
   const query=new URL(request.url).searchParams.get('q')?.trim()??'';
   if(query.length<2||query.length>100)return Response.json({error:'Enter a specific food or brand.'},{status:400});
   const apiKey=env.USDA_API_KEY?.trim();

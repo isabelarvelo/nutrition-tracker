@@ -89,8 +89,14 @@ async function getState(userId: string) {
   return { events, library, goals: goal ? { calories: Number(goal.calories), protein: Number(goal.protein), carbs: Number(goal.carbs), fat: Number(goal.fat), fiber: Number(goal.fiber) } : DEFAULT_GOALS, mealTimes:goal?{Breakfast:String(goal.breakfast_time??DEFAULT_MEAL_TIMES.Breakfast),Lunch:String(goal.lunch_time??DEFAULT_MEAL_TIMES.Lunch),Dinner:String(goal.dinner_time??DEFAULT_MEAL_TIMES.Dinner),Snack:String(goal.snack_time??DEFAULT_MEAL_TIMES.Snack)}:DEFAULT_MEAL_TIMES, timezone: String(goal?.timezone ?? DEFAULT_TIMEZONE) };
 }
 
-function parsedAmount(segment: string, fallbackQuantity: number, fallbackUnit: string, conversion?: {servingGrams:number|null;servingsPerCookedCup:number|null;unitGrams?:Record<string,number>}) {
-  return parseAmount(segment, fallbackQuantity, fallbackUnit, conversion);
+// R2 objects and uploads both need base64 for the vision request. Chunked to
+// keep the spread inside String.fromCharCode off the argument-count limit.
+function toBase64(bytes: ArrayBuffer): string {
+  const view = new Uint8Array(bytes);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < view.length; offset += chunkSize) binary += String.fromCharCode(...view.subarray(offset, offset + chunkSize));
+  return btoa(binary);
 }
 
 function scaleNutrients(nutrients: Nutrients, scale: number): Nutrients {
@@ -126,7 +132,7 @@ function canApplyServing(segment:string,result:FoodResearchResult){
 }
 
 function toCandidate(result:FoodResearchResult, providerId:'usda'|'off', segment:string):NonNullable<FoodItem['candidates']>[number]{
-  const amount=parsedAmount(segment,result.servingQuantity,result.servingUnit,result);
+  const amount=parseAmount(segment,result.servingQuantity,result.servingUnit,result);
   const compatible=canApplyServing(segment,result)&&amount.scale!=null;
   const quantity=compatible?amount.quantity:result.servingQuantity;
   const unit=compatible?amount.unit:result.servingUnit;
@@ -141,7 +147,7 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
   const apiKey=env.USDA_API_KEY?.trim();
   const items:FoodItem[]=[];
   const fromResearch=(segment:string,result:FoodResearchResult,confidence:number):FoodItem=>{
-    const amount=parsedAmount(segment,result.servingQuantity,result.servingUnit,result);const known=5+[result.iron,result.calcium,result.vitaminC].filter((value)=>value!=null).length;
+    const amount=parseAmount(segment,result.servingQuantity,result.servingUnit,result);const known=5+[result.iron,result.calcium,result.vitaminC].filter((value)=>value!=null).length;
     if (amount.scale == null) return {id:crypto.randomUUID(),name:cleanFoodName(segment),quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0,resolutionTier:'unresolved',unresolvedReason:'unit_mismatch'};
     return{id:crypto.randomUUID(),name:result.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(result,amount.scale),source:result.sourceLabel,sourceUrl:result.sourceUrl,libraryItemId:null,confidence,completeness:known/8,resolutionTier:'structured'};
   };
@@ -151,7 +157,7 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
     const candidates:NonNullable<FoodItem['candidates']>=[];
     const saved = findLibraryMatch(segment, library);
     if (saved) {
-      const amount = parsedAmount(segment, saved.quantity, saved.unit, saved);
+      const amount = parseAmount(segment, saved.quantity, saved.unit, saved);
       if(saved.components?.length&&amount.scale!=null)return libraryComponents(saved,amount.scale);
       if (amount.scale == null) { items.push({id:crypto.randomUUID(),name:cleanFoodName(segment),quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:saved.id,confidence:0,completeness:0,resolutionTier:'unresolved',unresolvedReason:'unit_mismatch'}); return items; }
       items.push({ ...saved, id: crypto.randomUUID(), quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(saved, amount.scale), source: 'Personal Library', sourceUrl:saved.sourceUrl, libraryItemId:saved.id, confidence: 1, completeness: .95, resolutionTier:'library' });return items;
@@ -160,12 +166,12 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
     const normalizedQuery=query.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
     const food=catalog.find((item)=>item.terms.some((term)=>item.exact?normalizedQuery===term:normalizedQuery.includes(term)));
     const preferStandard=/^(?:olive oil|parmesan cheese)$/.test(normalizedQuery);
-    if(preferStandard&&food){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:parsedFood.confidence,completeness:.86,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
+    if(preferStandard&&food){const amount=parseAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:parsedFood.confidence,completeness:.86,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
     try{if(!apiKey)throw new Error('USDA_API_KEY is not configured');const researched=await researchFoods(query,apiKey,false,8);researched.results=researched.results.filter(candidate=>isComponentMatch(query,candidate.name));candidates.push(...researched.results.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'usda',segment)));const result=researched.results.find((candidate)=>candidate.matchScore>=.6&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.95,.7+result.matchScore*.25)),candidates,clarificationQuestion:parsedFood.needsClarification});return items;}}
     catch(error){console.warn('USDA food resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
     try{const webResults=(await researchOpenFoodFacts(query,6)).filter(candidate=>isComponentMatch(query,candidate.name));candidates.push(...webResults.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'off',segment)));const result=webResults.find((candidate)=>candidate.matchScore>=.65&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.86,.55+result.matchScore*.3)),candidates:candidates.slice(0,3),clarificationQuestion:parsedFood.needsClarification});return items;}}
     catch(error){console.warn('Open Food Facts resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
-    if(food?.exact){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:Math.min(parsedFood.confidence,.9),completeness:.86,candidates,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
+    if(food?.exact){const amount=parseAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:Math.min(parsedFood.confidence,.9),completeness:.86,candidates,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
     const amount={quantity:parsedFood.quantity??1,unit:parsedFood.unit??'serving'};
     const reason=candidates.length?'unit_mismatch':'no_match';
     items.push({id:crypto.randomUUID(),name:parsedFood.name,quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0,candidates:candidates.sort((a,b)=>b.matchScore-a.matchScore).slice(0,3),resolutionTier:'unresolved',unresolvedReason:reason,clarificationQuestion:parsedFood.needsClarification??(candidates.length?'Which of these matches what you ate?':null)});
@@ -264,9 +270,7 @@ export async function POST(request: Request) {
       const key = `${user.userId}/${id}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
       const bytes=await file.arrayBuffer();
       await env.FILES.put(key, bytes, { httpMetadata: { contentType: file.type } });
-      const view=new Uint8Array(bytes);let binary='';const chunkSize=0x8000;
-      for(let offset=0;offset<view.length;offset+=chunkSize)binary+=String.fromCharCode(...view.subarray(offset,offset+chunkSize));
-      visionPhotos.push({mimeType:file.type as MealImageInput['mimeType'],base64:btoa(binary)});
+      visionPhotos.push({mimeType:file.type as MealImageInput['mimeType'],base64:toBase64(bytes)});
       evidenceStatements.push(env.DB.prepare(`INSERT INTO evidence (id,event_id,type,storage_key,filename,mime_type,sort_order,created_at) VALUES (?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), id, 'photo', key, file.name, file.type, index + 2, now));
     }
     if (evidenceStatements.length) await env.DB.batch(evidenceStatements);
@@ -296,9 +300,7 @@ export async function POST(request: Request) {
     for(const photo of evidence.results){
       const object=photo.storage_key?await env.FILES.get(String(photo.storage_key)):null;
       if(!object)continue;
-      const bytes=new Uint8Array(await object.arrayBuffer());let binary='';
-      for(let offset=0;offset<bytes.length;offset+=8192)binary+=String.fromCharCode(...bytes.subarray(offset,offset+8192));
-      photos.push({mimeType:String(photo.mime_type) as MealImageInput['mimeType'],base64:btoa(binary)});
+      photos.push({mimeType:String(photo.mime_type) as MealImageInput['mimeType'],base64:toBase64(await object.arrayBuffer())});
     }
     const others=await env.DB.prepare('SELECT name FROM logged_items WHERE event_id=? AND id!=?').bind(row.event_id,body.itemId).all<D1Row>();
     const description=`Break ONLY this target food into its editable ingredients: ${body.quantity} ${body.unit} ${body.name}. Use the photos if supplied to identify its layers, not other foods in the photo. Do not include the complete dish as an item. Additional information: ${body.details||'none'}. Other existing entries, which must not be recreated: ${others.results.map(x=>x.name).join(', ')||'none'}. Include all of the target's own ingredients even when they share names with those other entries. If this is already an indivisible ingredient, return just that ingredient.`;
