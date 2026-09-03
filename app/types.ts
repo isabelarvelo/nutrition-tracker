@@ -27,7 +27,7 @@ export type FoodItem = Nutrients & {
 };
 
 export type NutritionCandidate = {
-  providerId: 'library' | 'fatsecret' | 'usda' | 'off' | 'web' | 'estimate';
+  providerId: 'library' | 'usda' | 'off' | 'web' | 'estimate';
   externalId: string;
   name: string;
   brand: string | null;

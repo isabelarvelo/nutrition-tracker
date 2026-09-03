@@ -30,7 +30,7 @@ export const foodItemSchema = nutrientsSchema.extend({
 });
 
 export const nutritionCandidateSchema = z.object({
-  providerId: z.enum(['library', 'fatsecret', 'usda', 'off', 'web', 'estimate']),
+  providerId: z.enum(['library', 'usda', 'off', 'web', 'estimate']),
   externalId: id,
   name: z.string().trim().min(1).max(200),
   brand: shortText.nullable(),

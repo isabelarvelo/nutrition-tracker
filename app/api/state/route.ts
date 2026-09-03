@@ -45,7 +45,7 @@ const catalog: Array<{ terms: string[]; name: string; quantity: number; unit: st
 ];
 
 function mapItem(row: D1Row): FoodItem {
-  const legacySource=String(row.source);const source=legacySource==='personal library'?'Personal Library':legacySource==='reference estimate'?'Built-in reference':legacySource==='item estimate'||legacySource==='AI-style estimate'?'Legacy estimate · review':legacySource==='manual'?'Manual entry':legacySource;
+  const source = String(row.source);
   return {
     id: String(row.id), name: String(row.name), quantity: Number(row.quantity), unit: String(row.unit),
     calories: Number(row.calories), protein: Number(row.protein), carbs: Number(row.carbs), fat: Number(row.fat), fiber: Number(row.fiber),
@@ -89,8 +89,14 @@ async function getState(userId: string) {
   return { events, library, goals: goal ? { calories: Number(goal.calories), protein: Number(goal.protein), carbs: Number(goal.carbs), fat: Number(goal.fat), fiber: Number(goal.fiber) } : DEFAULT_GOALS, mealTimes:goal?{Breakfast:String(goal.breakfast_time??DEFAULT_MEAL_TIMES.Breakfast),Lunch:String(goal.lunch_time??DEFAULT_MEAL_TIMES.Lunch),Dinner:String(goal.dinner_time??DEFAULT_MEAL_TIMES.Dinner),Snack:String(goal.snack_time??DEFAULT_MEAL_TIMES.Snack)}:DEFAULT_MEAL_TIMES, timezone: String(goal?.timezone ?? DEFAULT_TIMEZONE) };
 }
 
-function parsedAmount(segment: string, fallbackQuantity: number, fallbackUnit: string, conversion?: {servingGrams:number|null;servingsPerCookedCup:number|null;unitGrams?:Record<string,number>}) {
-  return parseAmount(segment, fallbackQuantity, fallbackUnit, conversion);
+// R2 objects and uploads both need base64 for the vision request. Chunked to
+// keep the spread inside String.fromCharCode off the argument-count limit.
+function toBase64(bytes: ArrayBuffer): string {
+  const view = new Uint8Array(bytes);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < view.length; offset += chunkSize) binary += String.fromCharCode(...view.subarray(offset, offset + chunkSize));
+  return btoa(binary);
 }
 
 function scaleNutrients(nutrients: Nutrients, scale: number): Nutrients {
@@ -126,7 +132,7 @@ function canApplyServing(segment:string,result:FoodResearchResult){
 }
 
 function toCandidate(result:FoodResearchResult, providerId:'usda'|'off', segment:string):NonNullable<FoodItem['candidates']>[number]{
-  const amount=parsedAmount(segment,result.servingQuantity,result.servingUnit,result);
+  const amount=parseAmount(segment,result.servingQuantity,result.servingUnit,result);
   const compatible=canApplyServing(segment,result)&&amount.scale!=null;
   const quantity=compatible?amount.quantity:result.servingQuantity;
   const unit=compatible?amount.unit:result.servingUnit;
@@ -141,7 +147,7 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
   const apiKey=env.USDA_API_KEY?.trim();
   const items:FoodItem[]=[];
   const fromResearch=(segment:string,result:FoodResearchResult,confidence:number):FoodItem=>{
-    const amount=parsedAmount(segment,result.servingQuantity,result.servingUnit,result);const known=5+[result.iron,result.calcium,result.vitaminC].filter((value)=>value!=null).length;
+    const amount=parseAmount(segment,result.servingQuantity,result.servingUnit,result);const known=5+[result.iron,result.calcium,result.vitaminC].filter((value)=>value!=null).length;
     if (amount.scale == null) return {id:crypto.randomUUID(),name:cleanFoodName(segment),quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0,resolutionTier:'unresolved',unresolvedReason:'unit_mismatch'};
     return{id:crypto.randomUUID(),name:result.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(result,amount.scale),source:result.sourceLabel,sourceUrl:result.sourceUrl,libraryItemId:null,confidence,completeness:known/8,resolutionTier:'structured'};
   };
@@ -151,7 +157,7 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
     const candidates:NonNullable<FoodItem['candidates']>=[];
     const saved = findLibraryMatch(segment, library);
     if (saved) {
-      const amount = parsedAmount(segment, saved.quantity, saved.unit, saved);
+      const amount = parseAmount(segment, saved.quantity, saved.unit, saved);
       if(saved.components?.length&&amount.scale!=null)return libraryComponents(saved,amount.scale);
       if (amount.scale == null) { items.push({id:crypto.randomUUID(),name:cleanFoodName(segment),quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:saved.id,confidence:0,completeness:0,resolutionTier:'unresolved',unresolvedReason:'unit_mismatch'}); return items; }
       items.push({ ...saved, id: crypto.randomUUID(), quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(saved, amount.scale), source: 'Personal Library', sourceUrl:saved.sourceUrl, libraryItemId:saved.id, confidence: 1, completeness: .95, resolutionTier:'library' });return items;
@@ -160,12 +166,12 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
     const normalizedQuery=query.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
     const food=catalog.find((item)=>item.terms.some((term)=>item.exact?normalizedQuery===term:normalizedQuery.includes(term)));
     const preferStandard=/^(?:olive oil|parmesan cheese)$/.test(normalizedQuery);
-    if(preferStandard&&food){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:parsedFood.confidence,completeness:.86,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
+    if(preferStandard&&food){const amount=parseAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:parsedFood.confidence,completeness:.86,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
     try{if(!apiKey)throw new Error('USDA_API_KEY is not configured');const researched=await researchFoods(query,apiKey,false,8);researched.results=researched.results.filter(candidate=>isComponentMatch(query,candidate.name));candidates.push(...researched.results.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'usda',segment)));const result=researched.results.find((candidate)=>candidate.matchScore>=.6&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.95,.7+result.matchScore*.25)),candidates,clarificationQuestion:parsedFood.needsClarification});return items;}}
     catch(error){console.warn('USDA food resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
     try{const webResults=(await researchOpenFoodFacts(query,6)).filter(candidate=>isComponentMatch(query,candidate.name));candidates.push(...webResults.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'off',segment)));const result=webResults.find((candidate)=>candidate.matchScore>=.65&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.86,.55+result.matchScore*.3)),candidates:candidates.slice(0,3),clarificationQuestion:parsedFood.needsClarification});return items;}}
     catch(error){console.warn('Open Food Facts resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
-    if(food?.exact){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:Math.min(parsedFood.confidence,.9),completeness:.86,candidates,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
+    if(food?.exact){const amount=parseAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:Math.min(parsedFood.confidence,.9),completeness:.86,candidates,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
     const amount={quantity:parsedFood.quantity??1,unit:parsedFood.unit??'serving'};
     const reason=candidates.length?'unit_mismatch':'no_match';
     items.push({id:crypto.randomUUID(),name:parsedFood.name,quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0,candidates:candidates.sort((a,b)=>b.matchScore-a.matchScore).slice(0,3),resolutionTier:'unresolved',unresolvedReason:reason,clarificationQuestion:parsedFood.needsClarification??(candidates.length?'Which of these matches what you ate?':null)});
@@ -264,9 +270,7 @@ export async function POST(request: Request) {
       const key = `${user.userId}/${id}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
       const bytes=await file.arrayBuffer();
       await env.FILES.put(key, bytes, { httpMetadata: { contentType: file.type } });
-      const view=new Uint8Array(bytes);let binary='';const chunkSize=0x8000;
-      for(let offset=0;offset<view.length;offset+=chunkSize)binary+=String.fromCharCode(...view.subarray(offset,offset+chunkSize));
-      visionPhotos.push({mimeType:file.type as MealImageInput['mimeType'],base64:btoa(binary)});
+      visionPhotos.push({mimeType:file.type as MealImageInput['mimeType'],base64:toBase64(bytes)});
       evidenceStatements.push(env.DB.prepare(`INSERT INTO evidence (id,event_id,type,storage_key,filename,mime_type,sort_order,created_at) VALUES (?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), id, 'photo', key, file.name, file.type, index + 2, now));
     }
     if (evidenceStatements.length) await env.DB.batch(evidenceStatements);
@@ -296,9 +300,7 @@ export async function POST(request: Request) {
     for(const photo of evidence.results){
       const object=photo.storage_key?await env.FILES.get(String(photo.storage_key)):null;
       if(!object)continue;
-      const bytes=new Uint8Array(await object.arrayBuffer());let binary='';
-      for(let offset=0;offset<bytes.length;offset+=8192)binary+=String.fromCharCode(...bytes.subarray(offset,offset+8192));
-      photos.push({mimeType:String(photo.mime_type) as MealImageInput['mimeType'],base64:btoa(binary)});
+      photos.push({mimeType:String(photo.mime_type) as MealImageInput['mimeType'],base64:toBase64(await object.arrayBuffer())});
     }
     const others=await env.DB.prepare('SELECT name FROM logged_items WHERE event_id=? AND id!=?').bind(row.event_id,body.itemId).all<D1Row>();
     const description=`Break ONLY this target food into its editable ingredients: ${body.quantity} ${body.unit} ${body.name}. Use the photos if supplied to identify its layers, not other foods in the photo. Do not include the complete dish as an item. Additional information: ${body.details||'none'}. Other existing entries, which must not be recreated: ${others.results.map(x=>x.name).join(', ')||'none'}. Include all of the target's own ingredients even when they share names with those other entries. If this is already an indivisible ingredient, return just that ingredient.`;
@@ -318,19 +320,21 @@ export async function POST(request: Request) {
     await env.DB.batch([env.DB.prepare('INSERT INTO events (id,user_id,occurred_at,local_date,meal_type,status,note,created_at,updated_at,title) VALUES (?,?,?,?,?,?,?,?,?,?)').bind(id,user.userId,body.occurredAt,localDateFor(body.occurredAt,state.timezone),body.mealType,'estimated','',now,now,saved.name),...itemStatements(id,parts)]);
     await refreshEventStatus(id);
     return Response.json({ok:true,id});
-  } else if (action === 'verify' && await ownedEvent(String(body.eventId))) {
+  } else if (action === 'verify') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     await env.DB.prepare(`UPDATE events SET status = 'verified', updated_at = ? WHERE id = ?`).bind(new Date().toISOString(), body.eventId).run();
-  } else if (action === 'update_event' && await ownedEvent(String(body.eventId))) {
+  } else if (action === 'update_event') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     const settings = await env.DB.prepare('SELECT timezone FROM goals WHERE user_id = ?').bind(user.userId).first<D1Row>();
     await env.DB.prepare(`UPDATE events SET occurred_at = ?, local_date = ?, meal_type = ?, note = ?, updated_at = ? WHERE id = ?`).bind(body.occurredAt,localDateFor(body.occurredAt,String(settings?.timezone ?? DEFAULT_TIMEZONE)),body.mealType,body.note,new Date().toISOString(),body.eventId).run();
   } else if (action === 'update_item') {
     const item = body.item as FoodItem;
     const row = await env.DB.prepare('SELECT e.user_id,li.event_id FROM logged_items li JOIN events e ON e.id = li.event_id WHERE li.id = ?').bind(item.id).first<D1Row>();
-    if (row?.user_id === user.userId) {
-      await saveResolvedItem({...item,source:'Manually edited',sourceUrl:'',libraryItemId:null,confidence:1,completeness:(5+[item.iron,item.calcium,item.vitaminC].filter(x=>x!=null).length)/8,resolutionTier:'structured',clarificationQuestion:null});
-      await refreshEventStatus(String(row.event_id));
-    }
-  } else if (action === 'add_item' && await ownedEvent(String(body.eventId))) {
+    if (row?.user_id !== user.userId) return Response.json({ error: 'Food not found' }, { status: 404 });
+    await saveResolvedItem({...item,source:'Manually edited',sourceUrl:'',libraryItemId:null,confidence:1,completeness:(5+[item.iron,item.calcium,item.vitaminC].filter(x=>x!=null).length)/8,resolutionTier:'structured',clarificationQuestion:null});
+    await refreshEventStatus(String(row.event_id));
+  } else if (action === 'add_item') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     const item = body.item as FoodItem;
     await insertItems(String(body.eventId), [{ ...item, id: crypto.randomUUID(), source: item.source || 'Manual entry',sourceUrl:item.sourceUrl||'',libraryItemId:item.libraryItemId??null, confidence: item.confidence ?? 1, completeness: item.completeness ?? 1 }]);
     await refreshEventStatus(body.eventId);
@@ -353,19 +357,20 @@ export async function POST(request: Request) {
   } else if (action === 'delete_item') {
     const itemId = String(body.itemId);
     const row = await env.DB.prepare('SELECT e.user_id FROM logged_items li JOIN events e ON e.id = li.event_id WHERE li.id = ?').bind(itemId).first<D1Row>();
-    if (row?.user_id === user.userId) await env.DB.prepare('DELETE FROM logged_items WHERE id = ?').bind(itemId).run();
+    if (row?.user_id !== user.userId) return Response.json({ error: 'Food not found' }, { status: 404 });
+    await env.DB.prepare('DELETE FROM logged_items WHERE id = ?').bind(itemId).run();
   } else if (action === 'resolve_candidate') {
     const candidate=body.candidate;
     const row=await env.DB.prepare('SELECT li.*,e.user_id FROM logged_items li JOIN events e ON e.id=li.event_id WHERE li.id=?').bind(body.itemId).first<D1Row>();
-    if(row?.user_id===user.userId){
-      const stored=parseCandidates(row.candidates);
-      const selected=stored?.find(option=>option.externalId===candidate.externalId&&option.providerId===candidate.providerId);
-      if(!selected)return Response.json({error:'This option is no longer available. Refresh the meal and try again.'},{status:409});
-      const nutrients=selected.nutrients;const completeness=(5+[nutrients.iron,nutrients.calcium,nutrients.vitaminC].filter((value)=>value!=null).length)/8;
-      await saveResolvedItem({...mapItem(row),...nutrients,name:selected.name,quantity:selected.quantity??1,unit:selected.unit??selected.servingDescription,source:selected.sourceLabel,sourceUrl:selected.sourceUrl,libraryItemId:null,confidence:selected.matchScore,completeness,candidates:stored,resolutionTier:selected.providerId==='estimate'?'estimated':'structured',unresolvedReason:null,clarificationQuestion:selected.assumption??null});
-      await refreshEventStatus(String(row.event_id));
-    }
-  } else if (action === 'delete_event' && await ownedEvent(String(body.eventId))) {
+    if(row?.user_id!==user.userId) return Response.json({ error: 'Food not found' }, { status: 404 });
+    const stored=parseCandidates(row.candidates);
+    const selected=stored?.find(option=>option.externalId===candidate.externalId&&option.providerId===candidate.providerId);
+    if(!selected)return Response.json({error:'This option is no longer available. Refresh the meal and try again.'},{status:409});
+    const nutrients=selected.nutrients;const completeness=(5+[nutrients.iron,nutrients.calcium,nutrients.vitaminC].filter((value)=>value!=null).length)/8;
+    await saveResolvedItem({...mapItem(row),...nutrients,name:selected.name,quantity:selected.quantity??1,unit:selected.unit??selected.servingDescription,source:selected.sourceLabel,sourceUrl:selected.sourceUrl,libraryItemId:null,confidence:selected.matchScore,completeness,candidates:stored,resolutionTier:selected.providerId==='estimate'?'estimated':'structured',unresolvedReason:null,clarificationQuestion:selected.assumption??null});
+    await refreshEventStatus(String(row.event_id));
+  } else if (action === 'delete_event') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     const ev = await env.DB.prepare('SELECT storage_key FROM evidence WHERE event_id = ?').bind(body.eventId).all<D1Row>();
     for (const file of ev.results) if (file.storage_key) await env.FILES.delete(String(file.storage_key));
     await env.DB.batch([
@@ -373,7 +378,8 @@ export async function POST(request: Request) {
       env.DB.prepare('DELETE FROM evidence WHERE event_id = ?').bind(body.eventId),
       env.DB.prepare('DELETE FROM events WHERE id = ?').bind(body.eventId),
     ]);
-  } else if (action === 'repeat' && await ownedEvent(String(body.eventId))) {
+  } else if (action === 'repeat') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     const source = await env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(body.eventId).first<D1Row>();
     const sourceItems = await env.DB.prepare('SELECT * FROM logged_items WHERE event_id = ?').bind(body.eventId).all<D1Row>();
     const id = crypto.randomUUID(); const now = new Date().toISOString();
@@ -390,7 +396,8 @@ export async function POST(request: Request) {
     const group=await env.DB.prepare('SELECT components FROM library_items WHERE id=? AND user_id=?').bind(libraryItemId,user.userId).first<D1Row>();
     if(group?.components)return Response.json({error:'This Library entry is a meal group. Log it, edit its ingredients, then save the whole meal.'},{status:400});
     await env.DB.prepare(`UPDATE library_items SET name=?,quantity=?,unit=?,calories=?,protein=?,carbs=?,fat=?,fiber=?,iron=?,calcium=?,vitamin_c=? WHERE id=? AND user_id=?`).bind(item.name,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,libraryItemId,user.userId).run();
-  } else if (action === 'save_event_to_library' && await ownedEvent(String(body.eventId))) {
+  } else if (action === 'save_event_to_library') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     const event = await env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(body.eventId).first<D1Row>();
     const rows = await env.DB.prepare('SELECT * FROM logged_items WHERE event_id = ?').bind(body.eventId).all<D1Row>();
     const totals = rows.results.map(mapItem).reduce<Nutrients>((sum, item) => ({ calories: sum.calories+item.calories, protein: sum.protein+item.protein, carbs: sum.carbs+item.carbs, fat: sum.fat+item.fat, fiber: sum.fiber+item.fiber, iron: sum.iron==null&&item.iron==null?null:(sum.iron??0)+(item.iron??0), calcium: sum.calcium==null&&item.calcium==null?null:(sum.calcium??0)+(item.calcium??0), vitaminC: sum.vitaminC==null&&item.vitaminC==null?null:(sum.vitaminC??0)+(item.vitaminC??0) }), { calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null });
