@@ -8,7 +8,9 @@ export async function GET(request: Request) {
   const userId = user?.userId ?? (process.env.NODE_ENV !== 'production' ? 'local-single-user' : null);
   const key = new URL(request.url).searchParams.get('key');
   if (!userId) return new Response('Authentication required', { status: 401 });
-  if (!key || !key.startsWith(`${userId}/`)) return new Response('Not found', { status: 404 });
+  if (!key || key.includes('..') || key.includes('\\') || key.startsWith('/') || !key.startsWith(`${userId}/`)) return new Response('Not found', { status: 404 });
+  const segments = key.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..') || segments[0] !== userId) return new Response('Not found', { status: 404 });
   const object = await env.FILES.get(key);
   if (!object) return new Response('Not found', { status: 404 });
   const headers = new Headers();

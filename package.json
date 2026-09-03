@@ -10,13 +10,16 @@
     "build": "vinext build",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate"
+    "test": "node --experimental-strip-types --test app/lib/dates.test.mjs app/lib/resolve/amount.test.mjs app/lib/resolve/parse.test.mjs",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "wrangler d1 migrations apply"
   },
   "dependencies": {
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6",
-    "drizzle-orm": "0.45.2"
+    "drizzle-orm": "0.45.2",
+    "zod": "4.5.4"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",

@@ -1,9 +1,13 @@
 import type { Nutrients } from './types';
+import { normalizeMatchScore } from './lib/nutrition/types';
+import { and, eq, gt } from 'drizzle-orm';
+import { getDb } from '../db';
+import { providerCache } from '../db/schema';
 
 type UsdaNutrient = { nutrientId?: number; value?: number };
 type UsdaMeasure = { disseminationText?:string; modifier?:string; gramWeight?:number; measureUnit?:{name?:string} };
 type UsdaFood = { fdcId:number; dataType?:string; description?:string; brandOwner?:string; brandName?:string; servingSize?:number; servingSizeUnit?:string; householdServingFullText?:string; foodMeasures?:UsdaMeasure[]; foodNutrients?:UsdaNutrient[] };
-type OffProduct = { code?:string; product_name?:string; generic_name?:string; brands?:string; serving_size?:string; serving_quantity?:number|string; nutriments?:Record<string,number|string|undefined> };
+type OffProduct = { code?:string|number; product_name?:unknown; generic_name?:unknown; brands?:unknown; serving_size?:unknown; serving_quantity?:number|string; nutriments?:Record<string,number|string|undefined> };
 
 export type FoodResearchResult = Nutrients & {
   id:string; name:string; brand:string; description:string; serving:string;
@@ -14,6 +18,18 @@ export type FoodResearchResult = Nutrients & {
 
 const nutrientIds={calories:1008,protein:1003,carbs:1005,fat:1004,fiber:1079,iron:1089,calcium:1087,vitaminC:1162} as const;
 const searchCache=new Map<string,{expires:number;value:Promise<{results:FoodResearchResult[];searched:string}>}>();
+const offSearchTimes:number[]=[];
+
+async function readProviderCache<T>(key:string):Promise<T|null>{
+  try{const [row]=await getDb().select({payload:providerCache.payload}).from(providerCache).where(and(eq(providerCache.cacheKey,key),gt(providerCache.expiresAt,new Date().toISOString()))).limit(1);return row?JSON.parse(row.payload) as T:null;}
+  catch{return null;}
+}
+async function writeProviderCache(key:string,value:unknown,days:number){
+  try{const fetchedAt=new Date();const expiresAt=new Date(fetchedAt.valueOf()+days*86_400_000);const values={cacheKey:key,payload:JSON.stringify(value),fetchedAt:fetchedAt.toISOString(),expiresAt:expiresAt.toISOString()};await getDb().insert(providerCache).values(values).onConflictDoUpdate({target:providerCache.cacheKey,set:{payload:values.payload,fetchedAt:values.fetchedAt,expiresAt:values.expiresAt}});}
+  catch{/* Cache availability must never break capture. */}
+}
+function cacheKey(provider:string,query:string,suffix=''){return`${provider}:${query.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()}:${suffix}`;}
+function claimOffSearchSlot(){const cutoff=Date.now()-60_000;while(offSearchTimes[0]<cutoff)offSearchTimes.shift();if(offSearchTimes.length>=10)throw new Error('Open Food Facts search rate limit reached');offSearchTimes.push(Date.now());}
 
 function nutrient(food:UsdaFood,id:number){const found=food.foodNutrients?.find((item)=>item.nutrientId===id)?.value;return found==null?null:Number(found);}
 function compact(value:string){return value.toLowerCase().replace(/[^a-z0-9]/g,'');}
@@ -52,22 +68,28 @@ async function researchFoodsUncached(query:string,apiKey:string,brandedOnly:bool
   const cleaned=query.trim();let searched=cleaned;let foods=await fetchFoods(cleaned,apiKey,brandedOnly);const bestScore=Math.max(-99,...foods.map((food)=>relevance(food,cleaned)));const usefulWords=searchWords(cleaned);const fallbackQuery=usefulWords.find((word)=>word.length>=4)??cleaned;
   if(fallbackQuery.toLowerCase()!==cleaned.toLowerCase()&&bestScore<5){searched=fallbackQuery;const fallbackFoods=await fetchFoods(fallbackQuery,apiKey,brandedOnly);const seen=new Set(fallbackFoods.map((food)=>food.fdcId));foods=[...fallbackFoods,...foods.filter((food)=>!seen.has(food.fdcId))];}
   const results=foods.sort((a,b)=>relevance(b,cleaned)-relevance(a,cleaned)).slice(0,limit).map((food):FoodResearchResult=>{
-    const branded=food.dataType==='Branded';const servingGrams=/^(?:g|grm|gram)$/i.test(food.servingSizeUnit??'')?Number(food.servingSize):branded?null:100;const scale=servingGrams?servingGrams/100:1;const scaled=(id:number)=>{const value=nutrient(food,id);return value==null?null:value*scale;};
+    const branded=food.dataType==='Branded';const servingValue=Number(food.servingSize);const servingUnit=food.servingSizeUnit??'';const servingGrams=/^(?:g|grm|gram)$/i.test(servingUnit)?servingValue:/^(?:oz|ounce)$/i.test(servingUnit)?servingValue*28.3495:branded?null:100;const scale=servingGrams?servingGrams/100:1;const scaled=(id:number)=>{const value=nutrient(food,id);return value==null?null:value*scale;};
     const brand=food.brandName||food.brandOwner||'';const description=food.description?.replace(/\s+/g,' ').trim()||'Food';const serving=food.householdServingFullText||(servingGrams?`${servingGrams} g`:'1 serving');const parts=servingParts(serving,servingGrams);
-    return{id:String(food.fdcId),name:[brand,description].filter(Boolean).join(' · '),brand,description,dataType:food.dataType||'USDA food',serving,servingQuantity:parts.quantity,servingUnit:parts.unit,servingGrams,unitGrams:unitGramMap(food,servingGrams),servingsPerCookedCup:/\bpasta\b/i.test(description)?1:null,calories:scaled(nutrientIds.calories)??0,protein:scaled(nutrientIds.protein)??0,carbs:scaled(nutrientIds.carbs)??0,fat:scaled(nutrientIds.fat)??0,fiber:scaled(nutrientIds.fiber)??0,iron:scaled(nutrientIds.iron),calcium:scaled(nutrientIds.calcium),vitaminC:scaled(nutrientIds.vitaminC),sourceLabel:`USDA FoodData Central · ${food.dataType||'food record'}`,sourceUrl:`https://fdc.nal.usda.gov/fdc-app.html#/food-details/${food.fdcId}/nutrients`,matchScore:relevance(food,cleaned)};
+    return{id:String(food.fdcId),name:[brand,description].filter(Boolean).join(' · '),brand,description,dataType:food.dataType||'USDA food',serving,servingQuantity:parts.quantity,servingUnit:parts.unit,servingGrams,unitGrams:unitGramMap(food,servingGrams),servingsPerCookedCup:null,calories:scaled(nutrientIds.calories)??0,protein:scaled(nutrientIds.protein)??0,carbs:scaled(nutrientIds.carbs)??0,fat:scaled(nutrientIds.fat)??0,fiber:scaled(nutrientIds.fiber)??0,iron:scaled(nutrientIds.iron),calcium:scaled(nutrientIds.calcium),vitaminC:scaled(nutrientIds.vitaminC),sourceLabel:`USDA FoodData Central · ${food.dataType||'food record'}`,sourceUrl:`https://fdc.nal.usda.gov/fdc-app.html#/food-details/${food.fdcId}/nutrients`,matchScore:normalizeMatchScore(relevance(food,cleaned))};
   });return{results,searched};
 }
 export async function researchFoods(query:string,apiKey:string,brandedOnly=false,limit=6){
-  const key=`${query.trim().toLowerCase()}|${brandedOnly?'branded':'all'}|${limit}`;const cached=searchCache.get(key);if(cached&&cached.expires>Date.now())return cached.value;const value=researchFoodsUncached(query,apiKey,brandedOnly,limit);searchCache.set(key,{expires:Date.now()+10*60_000,value});try{return await value;}catch(error){searchCache.delete(key);throw error;}
+  const key=`${query.trim().toLowerCase()}|${brandedOnly?'branded':'all'}|${limit}`;const persistentKey=cacheKey('usda',query,`${brandedOnly?'branded':'all'}:${limit}`);const persistent=await readProviderCache<{results:FoodResearchResult[];searched:string}>(persistentKey);if(persistent)return persistent;const cached=searchCache.get(key);if(cached&&cached.expires>Date.now())return cached.value;const value=researchFoodsUncached(query,apiKey,brandedOnly,limit);searchCache.set(key,{expires:Date.now()+10*60_000,value});try{const result=await value;await writeProviderCache(persistentKey,result,30);return result;}catch(error){searchCache.delete(key);throw error;}
 }
 
 function offNumber(nutrients:Record<string,number|string|undefined>,key:string){const value=Number(nutrients[`${key}_100g`]);return Number.isFinite(value)?value:null;}
+function offText(value:unknown):string{
+  if(typeof value==='string'||typeof value==='number')return String(value).trim();
+  if(Array.isArray(value))return value.map(offText).filter(Boolean).join(', ');
+  if(value&&typeof value==='object')return Object.values(value).map(offText).find(Boolean)??'';
+  return'';
+}
 export async function researchOpenFoodFacts(query:string,limit=6):Promise<FoodResearchResult[]>{
-  const url=new URL('https://world.openfoodfacts.org/cgi/search.pl');url.searchParams.set('search_terms',query);url.searchParams.set('search_simple','1');url.searchParams.set('action','process');url.searchParams.set('json','1');url.searchParams.set('page_size','20');url.searchParams.set('fields','code,product_name,generic_name,brands,serving_size,serving_quantity,nutriments');
-  const response=await fetch(url,{headers:{'User-Agent':'MiseNutritionJournal/0.1 (OpenAI Sites app)'},signal:AbortSignal.timeout(12000)});if(!response.ok)throw new Error(`Open Food Facts search returned ${response.status}`);const products=((await response.json())as{products?:OffProduct[]}).products??[];
-  return products.map((product):FoodResearchResult|null=>{
-    const description=(product.product_name||product.generic_name||'').trim();const brand=(product.brands||'').trim();const text=`${brand} ${description}`.trim();const score=textRelevance(text,brand,query);const nutrients=product.nutriments??{};const calories=offNumber(nutrients,'energy-kcal')??((offNumber(nutrients,'energy-kj')??0)/4.184);if(!description||!calories)return null;
-    const servingGrams=Number(product.serving_quantity)||100;const scale=servingGrams/100;const unit=normalizedUnit(product.serving_size??'')||(searchWords(query).includes('bar')?'bar':'g');const servingQuantity=unit==='g'?servingGrams:1;const scaled=(key:string)=>{const value=offNumber(nutrients,key);return value==null?null:value*scale;};
-    return{id:`off-${product.code??compact(text)}`,name:[brand,description].filter(Boolean).join(' · '),brand,description,serving:product.serving_size||`${servingGrams} g`,servingQuantity,servingUnit:unit,servingGrams,unitGrams:{g:1,...(unit!=='g'?{[unit]:servingGrams}:{})},servingsPerCookedCup:null,sourceLabel:'Open Food Facts · product label',sourceUrl:`https://world.openfoodfacts.org/product/${product.code??''}`,matchScore:score,dataType:'Open Food Facts',calories:calories*scale,protein:scaled('proteins')??0,carbs:scaled('carbohydrates')??0,fat:scaled('fat')??0,fiber:scaled('fiber')??0,iron:scaled('iron'),calcium:scaled('calcium'),vitaminC:scaled('vitamin-c')};
-  }).filter((item):item is FoodResearchResult=>item!==null).sort((a,b)=>b.matchScore-a.matchScore).slice(0,limit);
+  const persistentKey=cacheKey('off',query,String(limit));const persistent=await readProviderCache<FoodResearchResult[]>(persistentKey);if(persistent)return persistent;claimOffSearchSlot();
+  const response=await fetch('https://search.openfoodfacts.org/search',{method:'POST',headers:{'Content-Type':'application/json','User-Agent':'MiseNutritionJournal/0.1 (OpenAI Sites app)'},signal:AbortSignal.timeout(12000),body:JSON.stringify({q:query,page_size:Math.min(20,Math.max(limit,6)),langs:['en'],fields:['code','product_name','generic_name','brands','serving_size','serving_quantity','nutriments']})});if(!response.ok)throw new Error(`Open Food Facts search returned ${response.status}`);const payload=await response.json() as {hits?:Array<OffProduct|{_source?:OffProduct}>};const products=(payload.hits??[]).map((hit)=>('_source'in hit&&hit._source?hit._source:hit as OffProduct));
+  const results=products.map((product):FoodResearchResult|null=>{
+    const description=offText(product.product_name)||offText(product.generic_name);const brand=offText(product.brands);const text=`${brand} ${description}`.trim();const score=normalizeMatchScore(textRelevance(text,brand,query));const nutrients=product.nutriments??{};const calories=offNumber(nutrients,'energy-kcal')??((offNumber(nutrients,'energy-kj')??0)/4.184);if(!description||!calories)return null;
+    const servingText=offText(product.serving_size);const servingGrams=Number(product.serving_quantity)||100;const scale=servingGrams/100;const unit=normalizedUnit(servingText)||(searchWords(query).includes('bar')?'bar':'g');const servingQuantity=unit==='g'?servingGrams:1;const scaled=(key:string)=>{const value=offNumber(nutrients,key);return value==null?null:value*scale;};
+    return{id:`off-${product.code??compact(text)}`,name:[brand,description].filter(Boolean).join(' · '),brand,description,serving:servingText||`${servingGrams} g`,servingQuantity,servingUnit:unit,servingGrams,unitGrams:{g:1,...(unit!=='g'?{[unit]:servingGrams}:{})},servingsPerCookedCup:null,sourceLabel:'Open Food Facts · product label',sourceUrl:`https://world.openfoodfacts.org/product/${product.code??''}`,matchScore:score,dataType:'Open Food Facts',calories:calories*scale,protein:scaled('proteins')??0,carbs:scaled('carbohydrates')??0,fat:scaled('fat')??0,fiber:scaled('fiber')??0,iron:scaled('iron'),calcium:scaled('calcium'),vitaminC:scaled('vitamin-c')};
+  }).filter((item):item is FoodResearchResult=>item!==null).sort((a,b)=>b.matchScore-a.matchScore).slice(0,limit);await writeProviderCache(persistentKey,results,30);return results;
 }

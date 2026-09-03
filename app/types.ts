@@ -19,6 +19,26 @@ export type FoodItem = Nutrients & {
   libraryItemId: string | null;
   confidence: number;
   completeness: number;
+  candidates?: NutritionCandidate[];
+  resolutionTier?: 'library' | 'structured' | 'web' | 'unresolved' | null;
+  unresolvedReason?: 'no_match' | 'unit_mismatch' | 'ambiguous_serving' | null;
+  clarificationQuestion?: string | null;
+  quotedSourceText?: string | null;
+};
+
+export type NutritionCandidate = {
+  providerId: 'library' | 'fatsecret' | 'usda' | 'off' | 'web';
+  externalId: string;
+  name: string;
+  brand: string | null;
+  servingDescription: string;
+  servingGrams: number | null;
+  unitGrams: Record<string, number>;
+  nutrients: Nutrients;
+  sourceLabel: string;
+  sourceUrl: string;
+  matchScore: number;
+  dataQuality: 'verified' | 'crowdsourced' | 'extracted';
 };
 
 export type Evidence = {
@@ -33,9 +53,10 @@ export type EatingEvent = {
   id: string;
   occurredAt: string;
   mealType: string;
-  status: 'captured' | 'estimated' | 'verified' | 'needs_attention';
+  status: 'captured' | 'resolving' | 'estimated' | 'verified' | 'needs_attention';
   note: string;
   createdAt: string;
+  localDate?: string;
   items: FoodItem[];
   evidence: Evidence[];
 };
@@ -73,6 +94,7 @@ export type AppState = {
   library: LibraryItem[];
   goals: Goals;
   mealTimes: MealTimes;
+  timezone?: string;
   user: { displayName: string; email: string };
 };
 

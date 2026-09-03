@@ -1,0 +1,41 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { parseMealEvidence, parseMealFallback } from './parse.ts';
+
+test('uses pasta context to normalize brand, oil, and Parmesan shorthand', () => {
+  const items=parseMealFallback('2 cups of cooked brami protein pasta, drizzle of oil and sprinkle of parm');
+  assert.deepEqual(items.map(({name,brand,unit,searchQuery})=>({name,brand,unit,searchQuery})),[
+    {name:'protein pasta',brand:'Brami',unit:'cups',searchQuery:'Brami protein pasta'},
+    {name:'Olive oil',brand:null,unit:'drizzle',searchQuery:'Olive oil'},
+    {name:'Parmesan cheese',brand:null,unit:'sprinkle',searchQuery:'Parmesan cheese'},
+  ]);
+  assert.match(items[0].needsClarification??'',/package servings/i);
+});
+
+test('does not invent numeric quantities for qualitative portions', () => {
+  const [oil]=parseMealFallback('drizzle of oil');
+  assert.equal(oil.quantity,null);
+  assert.equal(oil.unit,'drizzle');
+});
+
+test('sends multiple meal photos as one high-detail structured vision request', async () => {
+  const originalFetch=globalThis.fetch;
+  let requestBody;
+  globalThis.fetch=async (_url,init) => {
+    requestBody=JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({output_text:JSON.stringify({items:[{rawText:'4 oz grilled chicken breast',name:'Chicken breast',brand:null,quantity:4,unit:'oz',preparation:'grilled',searchQuery:'grilled chicken breast',confidence:.78,needsClarification:null}]})}));
+  };
+  try{
+    const items=await parseMealEvidence('',[
+      {mimeType:'image/jpeg',base64:'Zmlyc3Q='},
+      {mimeType:'image/png',base64:'c2Vjb25k'},
+    ],{apiKey:'test-key'});
+    assert.equal(items[0].name,'Chicken breast');
+    assert.equal(requestBody.model,'gpt-5.6-luna');
+    assert.equal(requestBody.text.format.type,'json_schema');
+    assert.deepEqual(requestBody.input[0].content.slice(1).map((part)=>({type:part.type,detail:part.detail,image_url:part.image_url})),[
+      {type:'input_image',detail:'high',image_url:'data:image/jpeg;base64,Zmlyc3Q='},
+      {type:'input_image',detail:'high',image_url:'data:image/png;base64,c2Vjb25k'},
+    ]);
+  }finally{globalThis.fetch=originalFetch;}
+});
