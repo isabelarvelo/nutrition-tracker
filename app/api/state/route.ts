@@ -45,7 +45,7 @@ const catalog: Array<{ terms: string[]; name: string; quantity: number; unit: st
 ];
 
 function mapItem(row: D1Row): FoodItem {
-  const legacySource=String(row.source);const source=legacySource==='personal library'?'Personal Library':legacySource==='reference estimate'?'Built-in reference':legacySource==='item estimate'||legacySource==='AI-style estimate'?'Legacy estimate · review':legacySource==='manual'?'Manual entry':legacySource;
+  const source = String(row.source);
   return {
     id: String(row.id), name: String(row.name), quantity: Number(row.quantity), unit: String(row.unit),
     calories: Number(row.calories), protein: Number(row.protein), carbs: Number(row.carbs), fat: Number(row.fat), fiber: Number(row.fiber),
