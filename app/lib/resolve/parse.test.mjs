@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseMealEvidence, parseMealFallback, parseMealBundle } from './parse.ts';
+import { parseMealFallback, parseMealBundle } from './parse.ts';
 
 test('uses pasta context to normalize brand, oil, and Parmesan shorthand', () => {
   const items=parseMealFallback('2 cups of cooked brami protein pasta, drizzle of oil and sprinkle of parm');
@@ -39,7 +39,7 @@ test('sends multiple meal photos as one high-detail structured vision request', 
     return new Response(JSON.stringify({output_text:JSON.stringify({items:[{rawText:'4 oz grilled chicken breast',name:'Chicken breast',brand:null,quantity:4,unit:'oz',preparation:'grilled',searchQuery:'grilled chicken breast',confidence:.78,needsClarification:null}]})}));
   };
   try{
-    const items=await parseMealEvidence('',[
+    const {items}=await parseMealBundle('',[
       {mimeType:'image/jpeg',base64:'Zmlyc3Q='},
       {mimeType:'image/png',base64:'c2Vjb25k'},
     ],{apiKey:'test-key'});

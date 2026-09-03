@@ -1,5 +1,5 @@
 import type { Nutrients } from './types';
-import { normalizeMatchScore } from './lib/nutrition/types';
+import { normalizeMatchScore } from './lib/nutrition/score';
 import { and, eq, gt } from 'drizzle-orm';
 import { getDb } from '../db';
 import { providerCache } from '../db/schema';

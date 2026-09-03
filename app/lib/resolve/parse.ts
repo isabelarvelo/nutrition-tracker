@@ -130,10 +130,3 @@ export async function parseMealBundle(text:string,images:MealImageInput[],option
     return {title:text.trim().slice(0,200),items:text.trim()?parseMealFallback(text):[]};
   }
 }
-
-export async function parseMealText(text:string,options:{apiKey?:string;model?:string}):Promise<ParsedFood[]>{
-  return (await parseTextBundle(text,options)).items;
-}
-export async function parseMealEvidence(text:string,images:MealImageInput[],options:{apiKey?:string;model?:string}):Promise<ParsedFood[]>{
-  return (await parseMealBundle(text,images,options)).items;
-}
