@@ -10,6 +10,7 @@ type UsdaFood = { fdcId:number; dataType?:string; description?:string; brandOwne
 type OffProduct = { code?:string|number; product_name?:unknown; generic_name?:unknown; brands?:unknown; serving_size?:unknown; serving_quantity?:number|string; nutriments?:Record<string,number|string|undefined> };
 
 export type FoodResearchResult = Nutrients & {
+  explanation?:string;
   id:string; name:string; brand:string; description:string; serving:string;
   servingQuantity:number; servingUnit:string; servingGrams:number|null;
   unitGrams:Record<string,number>; servingsPerCookedCup:number|null;
