@@ -318,19 +318,21 @@ export async function POST(request: Request) {
     await env.DB.batch([env.DB.prepare('INSERT INTO events (id,user_id,occurred_at,local_date,meal_type,status,note,created_at,updated_at,title) VALUES (?,?,?,?,?,?,?,?,?,?)').bind(id,user.userId,body.occurredAt,localDateFor(body.occurredAt,state.timezone),body.mealType,'estimated','',now,now,saved.name),...itemStatements(id,parts)]);
     await refreshEventStatus(id);
     return Response.json({ok:true,id});
-  } else if (action === 'verify' && await ownedEvent(String(body.eventId))) {
+  } else if (action === 'verify') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     await env.DB.prepare(`UPDATE events SET status = 'verified', updated_at = ? WHERE id = ?`).bind(new Date().toISOString(), body.eventId).run();
-  } else if (action === 'update_event' && await ownedEvent(String(body.eventId))) {
+  } else if (action === 'update_event') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     const settings = await env.DB.prepare('SELECT timezone FROM goals WHERE user_id = ?').bind(user.userId).first<D1Row>();
     await env.DB.prepare(`UPDATE events SET occurred_at = ?, local_date = ?, meal_type = ?, note = ?, updated_at = ? WHERE id = ?`).bind(body.occurredAt,localDateFor(body.occurredAt,String(settings?.timezone ?? DEFAULT_TIMEZONE)),body.mealType,body.note,new Date().toISOString(),body.eventId).run();
   } else if (action === 'update_item') {
     const item = body.item as FoodItem;
     const row = await env.DB.prepare('SELECT e.user_id,li.event_id FROM logged_items li JOIN events e ON e.id = li.event_id WHERE li.id = ?').bind(item.id).first<D1Row>();
-    if (row?.user_id === user.userId) {
-      await saveResolvedItem({...item,source:'Manually edited',sourceUrl:'',libraryItemId:null,confidence:1,completeness:(5+[item.iron,item.calcium,item.vitaminC].filter(x=>x!=null).length)/8,resolutionTier:'structured',clarificationQuestion:null});
-      await refreshEventStatus(String(row.event_id));
-    }
-  } else if (action === 'add_item' && await ownedEvent(String(body.eventId))) {
+    if (row?.user_id !== user.userId) return Response.json({ error: 'Food not found' }, { status: 404 });
+    await saveResolvedItem({...item,source:'Manually edited',sourceUrl:'',libraryItemId:null,confidence:1,completeness:(5+[item.iron,item.calcium,item.vitaminC].filter(x=>x!=null).length)/8,resolutionTier:'structured',clarificationQuestion:null});
+    await refreshEventStatus(String(row.event_id));
+  } else if (action === 'add_item') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     const item = body.item as FoodItem;
     await insertItems(String(body.eventId), [{ ...item, id: crypto.randomUUID(), source: item.source || 'Manual entry',sourceUrl:item.sourceUrl||'',libraryItemId:item.libraryItemId??null, confidence: item.confidence ?? 1, completeness: item.completeness ?? 1 }]);
     await refreshEventStatus(body.eventId);
@@ -353,19 +355,20 @@ export async function POST(request: Request) {
   } else if (action === 'delete_item') {
     const itemId = String(body.itemId);
     const row = await env.DB.prepare('SELECT e.user_id FROM logged_items li JOIN events e ON e.id = li.event_id WHERE li.id = ?').bind(itemId).first<D1Row>();
-    if (row?.user_id === user.userId) await env.DB.prepare('DELETE FROM logged_items WHERE id = ?').bind(itemId).run();
+    if (row?.user_id !== user.userId) return Response.json({ error: 'Food not found' }, { status: 404 });
+    await env.DB.prepare('DELETE FROM logged_items WHERE id = ?').bind(itemId).run();
   } else if (action === 'resolve_candidate') {
     const candidate=body.candidate;
     const row=await env.DB.prepare('SELECT li.*,e.user_id FROM logged_items li JOIN events e ON e.id=li.event_id WHERE li.id=?').bind(body.itemId).first<D1Row>();
-    if(row?.user_id===user.userId){
-      const stored=parseCandidates(row.candidates);
-      const selected=stored?.find(option=>option.externalId===candidate.externalId&&option.providerId===candidate.providerId);
-      if(!selected)return Response.json({error:'This option is no longer available. Refresh the meal and try again.'},{status:409});
-      const nutrients=selected.nutrients;const completeness=(5+[nutrients.iron,nutrients.calcium,nutrients.vitaminC].filter((value)=>value!=null).length)/8;
-      await saveResolvedItem({...mapItem(row),...nutrients,name:selected.name,quantity:selected.quantity??1,unit:selected.unit??selected.servingDescription,source:selected.sourceLabel,sourceUrl:selected.sourceUrl,libraryItemId:null,confidence:selected.matchScore,completeness,candidates:stored,resolutionTier:selected.providerId==='estimate'?'estimated':'structured',unresolvedReason:null,clarificationQuestion:selected.assumption??null});
-      await refreshEventStatus(String(row.event_id));
-    }
-  } else if (action === 'delete_event' && await ownedEvent(String(body.eventId))) {
+    if(row?.user_id!==user.userId) return Response.json({ error: 'Food not found' }, { status: 404 });
+    const stored=parseCandidates(row.candidates);
+    const selected=stored?.find(option=>option.externalId===candidate.externalId&&option.providerId===candidate.providerId);
+    if(!selected)return Response.json({error:'This option is no longer available. Refresh the meal and try again.'},{status:409});
+    const nutrients=selected.nutrients;const completeness=(5+[nutrients.iron,nutrients.calcium,nutrients.vitaminC].filter((value)=>value!=null).length)/8;
+    await saveResolvedItem({...mapItem(row),...nutrients,name:selected.name,quantity:selected.quantity??1,unit:selected.unit??selected.servingDescription,source:selected.sourceLabel,sourceUrl:selected.sourceUrl,libraryItemId:null,confidence:selected.matchScore,completeness,candidates:stored,resolutionTier:selected.providerId==='estimate'?'estimated':'structured',unresolvedReason:null,clarificationQuestion:selected.assumption??null});
+    await refreshEventStatus(String(row.event_id));
+  } else if (action === 'delete_event') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     const ev = await env.DB.prepare('SELECT storage_key FROM evidence WHERE event_id = ?').bind(body.eventId).all<D1Row>();
     for (const file of ev.results) if (file.storage_key) await env.FILES.delete(String(file.storage_key));
     await env.DB.batch([
@@ -373,7 +376,8 @@ export async function POST(request: Request) {
       env.DB.prepare('DELETE FROM evidence WHERE event_id = ?').bind(body.eventId),
       env.DB.prepare('DELETE FROM events WHERE id = ?').bind(body.eventId),
     ]);
-  } else if (action === 'repeat' && await ownedEvent(String(body.eventId))) {
+  } else if (action === 'repeat') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     const source = await env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(body.eventId).first<D1Row>();
     const sourceItems = await env.DB.prepare('SELECT * FROM logged_items WHERE event_id = ?').bind(body.eventId).all<D1Row>();
     const id = crypto.randomUUID(); const now = new Date().toISOString();
@@ -390,7 +394,8 @@ export async function POST(request: Request) {
     const group=await env.DB.prepare('SELECT components FROM library_items WHERE id=? AND user_id=?').bind(libraryItemId,user.userId).first<D1Row>();
     if(group?.components)return Response.json({error:'This Library entry is a meal group. Log it, edit its ingredients, then save the whole meal.'},{status:400});
     await env.DB.prepare(`UPDATE library_items SET name=?,quantity=?,unit=?,calories=?,protein=?,carbs=?,fat=?,fiber=?,iron=?,calcium=?,vitamin_c=? WHERE id=? AND user_id=?`).bind(item.name,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,libraryItemId,user.userId).run();
-  } else if (action === 'save_event_to_library' && await ownedEvent(String(body.eventId))) {
+  } else if (action === 'save_event_to_library') {
+    if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     const event = await env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(body.eventId).first<D1Row>();
     const rows = await env.DB.prepare('SELECT * FROM logged_items WHERE event_id = ?').bind(body.eventId).all<D1Row>();
     const totals = rows.results.map(mapItem).reduce<Nutrients>((sum, item) => ({ calories: sum.calories+item.calories, protein: sum.protein+item.protein, carbs: sum.carbs+item.carbs, fat: sum.fat+item.fat, fiber: sum.fiber+item.fiber, iron: sum.iron==null&&item.iron==null?null:(sum.iron??0)+(item.iron??0), calcium: sum.calcium==null&&item.calcium==null?null:(sum.calcium??0)+(item.calcium??0), vitaminC: sum.vitaminC==null&&item.vitaminC==null?null:(sum.vitaminC??0)+(item.vitaminC??0) }), { calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null });
