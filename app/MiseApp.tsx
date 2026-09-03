@@ -30,7 +30,7 @@ function sumItems(items: FoodItem[]): Nutrients {
   }), { ...emptyNutrients });
 }
 function eventTotals(event: EatingEvent) { return sumItems(event.items); }
-function eventRevision(event:EatingEvent){return JSON.stringify(event);}
+function itemsSignature(items:FoodItem[]){return JSON.stringify(items);}
 function round(value: number) { return Math.round(value); }
 function statusLabel(status: EatingEvent['status']) { return status === 'needs_attention' ? 'Needs attention' : status[0].toUpperCase() + status.slice(1); }
 function libraryDraftFromFood(item:FoodItem):LibraryItem { const gramMatch=item.unit.match(/([\d.]+)\s*g\b/i);return{id:'',name:item.name,kind:'food',alias:item.name.toLowerCase(),quantity:item.quantity,unit:item.unit,calories:item.calories,protein:item.protein,carbs:item.carbs,fat:item.fat,fiber:item.fiber,iron:item.iron,calcium:item.calcium,vitaminC:item.vitaminC,servingGrams:gramMatch?Number(gramMatch[1]):null,servingsPerCookedCup:/\bpasta\b/i.test(item.name)?1:null,sourceLabel:item.source,sourceUrl:item.sourceUrl}; }
@@ -206,7 +206,7 @@ function TodayView({ events, library, totals, goals, coverage, selectedDay, setS
       <div className="trust-card"><div><span className="status-dot verified" /><strong>{coverage}% verified</strong></div><p>{events.filter((event) => event.status !== 'verified').length ? `${events.filter((event) => event.status !== 'verified').length} ${events.filter((event) => event.status !== 'verified').length === 1 ? 'meal is' : 'meals are'} still estimated.` : events.length ? 'Everything logged today has been reviewed.' : 'Log your first meal to begin.'}</p></div>
     </section>
     <div className="section-title"><div><h2>{isToday ? 'Today’s meals' : 'Meals for this day'}</h2><span>{events.length} {events.length === 1 ? 'event' : 'events'}</span></div></div>
-    {events.length ? <div className="event-list">{events.map((event) => <EventCard key={eventRevision(event)} event={event} library={library} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div> : <button className="empty-state" onClick={onCapture}><span>＋</span><strong>Nothing logged on this day</strong><p>Add a meal now, or choose another date above.</p></button>}
+    {events.length ? <div className="event-list">{events.map((event) => <EventCard key={event.id} event={event} library={library} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div> : <button className="empty-state" onClick={onCapture}><span>＋</span><strong>Nothing logged on this day</strong><p>Add a meal now, or choose another date above.</p></button>}
   </>;
 }
 
@@ -214,9 +214,19 @@ function Macro({ label, value, goal }: { label:string; value:number; goal:number
 
 function EventCard({ event, library, open, onToggle, action, saving }: { event:EatingEvent;library:LibraryItem[];open:boolean;onToggle:()=>void;action:(body:Record<string,unknown>, success?:string)=>void;saving:boolean }) {
   const totals = eventTotals(event);
+  // The server owns items and entry details; these drafts mirror them. Rather
+  // than forcing a remount (which also discarded unrelated in-progress input),
+  // reset a draft only when the value it mirrors actually changes.
+  const serverItems = useMemo(() => itemsSignature(event.items), [event.items]);
+  const serverDetails = `${event.title}\u0000${event.mealType}\u0000${event.note}\u0000${event.occurredAt}`;
   const [items, setItems] = useState(event.items);
+  const [syncedItems, setSyncedItems] = useState(serverItems);
+  if (syncedItems !== serverItems) { setSyncedItems(serverItems); setItems(event.items); }
   const [additionalFoods,setAdditionalFoods]=useState('');
-  const [details, setDetails] = useState({ title:event.title||event.note.slice(0,200)||`${event.mealType} meal`, mealType:event.mealType, note:event.note, occurredAt:localDateTimeValue(event.occurredAt) });
+  const detailsFromEvent = () => ({ title:event.title||event.note.slice(0,200)||`${event.mealType} meal`, mealType:event.mealType, note:event.note, occurredAt:localDateTimeValue(event.occurredAt) });
+  const [details, setDetails] = useState(detailsFromEvent);
+  const [syncedDetails, setSyncedDetails] = useState(serverDetails);
+  if (syncedDetails !== serverDetails) { setSyncedDetails(serverDetails); setDetails(detailsFromEvent()); }
   const time = new Date(event.occurredAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   function addFood() {
     setItems((all)=>[...all,{ id:`new-${crypto.randomUUID()}`,name:'',quantity:1,unit:'serving',calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Manual entry',sourceUrl:'',libraryItemId:null,confidence:1,completeness:1 }]);
@@ -235,13 +245,15 @@ function EventCard({ event, library, open, onToggle, action, saving }: { event:E
         </form>
         {items.map((item, index) => {const libraryItem=library.find((saved)=>saved.id===item.libraryItemId||saved.name.toLowerCase()===item.name.toLowerCase());return <EditableItem key={item.id} item={item} saving={saving} onBreak={(details)=>action({action:"break_item",itemId:item.id,name:item.name,quantity:item.quantity,unit:item.unit,details},"Replaced the whole food with editable ingredients.")} libraryItem={libraryItem} onChange={(next) => setItems((all) => all.map((current, i) => i === index ? next : current))} onEstimate={()=>action({action:'estimate_item',itemId:item.id,name:item.name,quantity:item.quantity,unit:item.unit},'Nutrition re-estimated. Review the suggested matches.')} onSave={(next) => action(next.id.startsWith('new-') ? { action:'add_item',eventId:event.id,item:next } : { action:'update_item',item:next },next.id.startsWith('new-')?'Food added.':'Item updated.')} onDelete={()=>item.id.startsWith('new-')?setItems((all)=>all.filter((current)=>current.id!==item.id)):action({action:'delete_item',itemId:item.id},'Food removed.')} onResolve={(candidate)=>action({action:'resolve_candidate',itemId:item.id,candidate},'Food matched and nutrition updated.')} onAddLibrary={()=>action({action:'save_library',item:libraryDraftFromFood(item)},'Added this food to your Library.')} onUpdateLibrary={()=>libraryItem&&action({action:'update_library_from_item',libraryItemId:libraryItem.id,item},'Library food updated from this entry.')} />})}</div>
       <div className="confidence-note provenance-note"><span>≈</span><p><strong>A useful estimate, yours to refine</strong><br />Database matches are preferred. AI estimates use typical portions and are clearly labeled; unavailable micronutrients stay unknown. Edit names or amounts, compare other matches, and verify when you’re happy.</p></div>
-      <div className="event-actions"><button onClick={() => action({ action:'delete_event', eventId:event.id }, 'Meal deleted.')}>Delete</button><button disabled={saving||!details.title.trim()||!items.length||JSON.stringify(items)!==JSON.stringify(event.items)} title="Save ingredient edits first, then save the whole named meal." onClick={() => action({ action:"save_event_to_library", eventId:event.id, name:details.title }, "Saved the meal title and all ingredients to your Library.")}>Save meal & ingredients to Library</button><button onClick={() => action({ action:'repeat', eventId:event.id }, 'Meal repeated for today.')}>Repeat today</button>{event.status !== 'verified' && <button className="primary" disabled={saving} onClick={() => action({ action:'verify', eventId:event.id }, 'Meal marked verified.')}>Mark verified ✓</button>}</div>
+      <div className="event-actions"><button onClick={() => action({ action:'delete_event', eventId:event.id }, 'Meal deleted.')}>Delete</button><button disabled={saving||!details.title.trim()||!items.length||itemsSignature(items)!==serverItems} title="Save ingredient edits first, then save the whole named meal." onClick={() => action({ action:"save_event_to_library", eventId:event.id, name:details.title }, "Saved the meal title and all ingredients to your Library.")}>Save meal & ingredients to Library</button><button onClick={() => action({ action:'repeat', eventId:event.id }, 'Meal repeated for today.')}>Repeat today</button>{event.status !== 'verified' && <button className="primary" disabled={saving} onClick={() => action({ action:'verify', eventId:event.id }, 'Meal marked verified.')}>Mark verified ✓</button>}</div>
     </div>}
   </article>;
 }
 
 function EditableItem({ item, libraryItem, saving, onBreak, onChange, onSave, onDelete, onResolve, onEstimate, onAddLibrary, onUpdateLibrary }: { item:FoodItem;libraryItem?:LibraryItem;saving:boolean;onBreak:(details:string)=>void;onChange:(item:FoodItem)=>void;onSave:(item:FoodItem)=>void;onDelete:()=>void;onResolve:(candidate:NonNullable<FoodItem['candidates']>[number])=>void;onEstimate:()=>void;onAddLibrary:()=>void;onUpdateLibrary:()=>void }) {
   const [quantityDraft,setQuantityDraft]=useState(String(item.quantity));
+  const [syncedQuantity,setSyncedQuantity]=useState(item.quantity);
+  if(syncedQuantity!==item.quantity){setSyncedQuantity(item.quantity);setQuantityDraft(String(item.quantity));}
   const [breaking,setBreaking]=useState(false);
   const [breakDetails,setBreakDetails]=useState('');
   const unresolved=item.resolutionTier==='unresolved'||item.source.toLowerCase().includes('needs');
@@ -265,7 +277,7 @@ function EditableItem({ item, libraryItem, saving, onBreak, onChange, onSave, on
 }
 
 function ReviewView({ events, library, expanded, setExpanded, action, saving }: { events:EatingEvent[];library:LibraryItem[];expanded:string|null;setExpanded:(id:string|null)=>void;action:(body:Record<string,unknown>,success?:string)=>void;saving:boolean }) {
-  return <><div className="page-heading"><div><span className="eyebrow">Review inbox</span><h1>Resolve what matters</h1><p>Only uncertain meals wait here. Estimates can stay estimates as long as you like.</p></div></div>{events.length ? <div className="review-banner"><span>≈</span><div><strong>{events.length} {events.length === 1 ? 'entry needs' : 'entries need'} a look</strong><p>Recent entries and foods without a reliable source appear here.</p></div></div> : <div className="all-clear"><span>✓</span><h2>You’re all caught up</h2><p>No captured or estimated meals need attention.</p></div>}<div className="event-list">{events.map((event) => <EventCard key={eventRevision(event)} event={event} library={library} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div></>;
+  return <><div className="page-heading"><div><span className="eyebrow">Review inbox</span><h1>Resolve what matters</h1><p>Only uncertain meals wait here. Estimates can stay estimates as long as you like.</p></div></div>{events.length ? <div className="review-banner"><span>≈</span><div><strong>{events.length} {events.length === 1 ? 'entry needs' : 'entries need'} a look</strong><p>Recent entries and foods without a reliable source appear here.</p></div></div> : <div className="all-clear"><span>✓</span><h2>You’re all caught up</h2><p>No captured or estimated meals need attention.</p></div>}<div className="event-list">{events.map((event) => <EventCard key={event.id} event={event} library={library} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div></>;
 }
 
 function TrendsView({ events, goals, mealTimes, onSave, onDeleteAll }: { events:EatingEvent[]; goals:Goals; mealTimes:MealTimes; onSave:(goals:Goals,mealTimes:MealTimes)=>void; onDeleteAll:()=>void }) {
