@@ -77,6 +77,9 @@ export const mealTimesSchema = z.object({
 });
 
 export const actionSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('rename_event'), eventId:id, title:z.string().trim().min(1).max(200) }),
+  z.object({ action: z.literal('break_item'), itemId:id, name:z.string().trim().min(1).max(200), quantity:z.number().finite().positive().max(20000), unit:z.string().trim().min(1).max(80), details:z.string().trim().max(2000).optional() }),
+  z.object({ action: z.literal('log_library'), itemId:id, occurredAt:z.iso.datetime(), mealType:shortText }),
   z.object({ action: z.literal('verify'), eventId: id }),
   z.object({ action: z.literal('update_event'), eventId: id, occurredAt: z.iso.datetime(), mealType: shortText, note: z.string().max(10_000) }),
   z.object({ action: z.literal('update_item'), item: foodItemSchema }),
@@ -96,6 +99,7 @@ export const actionSchema = z.discriminatedUnion('action', [
 ]);
 
 export const capturePayloadSchema = z.object({
+  title:z.string().trim().max(200).optional(),
   note: z.string().trim().max(10_000).optional(),
   transcript: z.string().trim().max(10_000).optional(),
   occurredAt: z.iso.datetime().optional(),

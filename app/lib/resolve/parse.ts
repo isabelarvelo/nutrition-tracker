@@ -12,15 +12,16 @@ const parsedFoodSchema = z.object({
   needsClarification: z.string().max(300).nullable(),
 });
 
-const parsedMealSchema = z.object({ items: z.array(parsedFoodSchema).max(30) });
+const parsedMealSchema = z.object({ title:z.string().trim().max(200).default(''), items: z.array(parsedFoodSchema).max(30) });
 export type ParsedFood = z.infer<typeof parsedFoodSchema>;
 export type MealImageInput = { mimeType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif'; base64: string };
 
 const responseSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['items'],
+  required: ['title','items'],
   properties: {
+    title: {type:'string'},
     items: {
       type: 'array',
       minItems: 0,
@@ -46,7 +47,8 @@ const responseSchema = {
 };
 
 const instructions = `You parse a person's short meal description into foods for deterministic nutrition lookup.
-- Split separate foods and toppings, but keep a commercially sold composite dish together.
+- Give the whole eating event a short, descriptive title, such as "Egg and vegetable bagel sandwich". The title has no separate nutrient entry.
+- Break sandwiches, bowls, salads and other mixed dishes into individual edible components even when commercially prepared. Include bread, fillings and spreads separately. Never return both a whole dish and its ingredients. For an unspecified mixed dish, infer a typical composition and explicitly flag assumed ingredients. Keep indivisible foods such as a bagel or cheese as one component rather than flour, water, etc.
 - Use surrounding meal context to expand shorthand. On pasta, "parm" means grated Parmesan cheese and an unspecified cooking oil means olive oil unless the text says otherwise.
 - Separate brand from food name. "Brami protein pasta" becomes brand "Brami" and name "protein pasta".
 - Keep qualitative amounts as qualitative units: drizzle, sprinkle, handful. Do not convert them into teaspoons or grams.
@@ -59,7 +61,9 @@ const instructions = `You parse a person's short meal description into foods for
 const visionInstructions = `You interpret all supplied evidence as one eating event for deterministic nutrition lookup.
 - Use both the person's description and every image. Images may show a dish, menu, nutrition label, recipe, ingredient, receipt, or portion reference.
 - Do not create duplicate items when multiple images show the same food. Use extra images as supporting evidence.
-- Split visually distinct foods, toppings, sauces, drinks, and cooking fats when they materially affect nutrition. Keep a commercially sold composite dish together.
+- Give the whole eating event a short, descriptive title, such as "Egg and vegetable bagel sandwich". The title has no separate nutrient entry.
+- Break sandwiches, bowls, salads and other mixed dishes into individually editable components even when commercially prepared. Return bagel/bread, egg, greens, tomato, cheese and spread separately when supported by evidence. Never return both the complete dish and its ingredients. Keep indivisible foods such as a bagel as one component, not flour/water/etc.
+- Inspect every visible layer before finishing. Do not assume egg is cheese, or cheese is egg; flag uncertainty about identity and portions. Hidden ingredients may be inferred only when needed for a useful estimate and must be identified as assumptions in needsClarification. A sandwich cut in halves is not automatically two sandwiches.
 - Read visible menu, package, and nutrition-label text when it improves identification, but do not invent text that is not legible.
 - Estimate a practical portion only when visual evidence supports one. Prefer grams, ounces, cups, tablespoons, pieces, slices, or a common serving unit.
 - rawText must be a concise lookup phrase that includes the estimated quantity and unit when available, followed by the food name and preparation. Example: "4 oz grilled chicken breast".
@@ -92,22 +96,25 @@ function outputText(payload:{output_text?:unknown;output?:Array<{content?:Array<
   return payload.output?.flatMap((item)=>item.content??[]).find((item)=>item.type==='output_text')?.text??'';
 }
 
-export async function parseMealText(text:string,options:{apiKey?:string;model?:string}):Promise<ParsedFood[]>{
-  if(!options.apiKey)return parseMealFallback(text);
+async function parseTextBundle(text:string,options:{apiKey?:string;model?:string;requireModel?:boolean}){
+  if(options.requireModel&&!options.apiKey)throw new Error('Photo interpretation is not configured');
+  if(!options.apiKey)return {title:text.trim().slice(0,200),items:parseMealFallback(text)};
   try{
     const response=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{Authorization:`Bearer ${options.apiKey}`,'Content-Type':'application/json'},signal:AbortSignal.timeout(15_000),body:JSON.stringify({model:options.model??'gpt-5.4-mini',instructions,input:text,store:false,text:{format:{type:'json_schema',name:'parsed_meal',strict:true,schema:responseSchema}}})});
     if(!response.ok)throw new Error(`OpenAI parse returned ${response.status}`);
     const payload=await response.json() as {output_text?:unknown;output?:Array<{content?:Array<{type?:string;text?:string}>}>};
-    return parsedMealSchema.parse(JSON.parse(outputText(payload))).items;
+    return parsedMealSchema.parse(JSON.parse(outputText(payload)));
   }catch(error){
+    if(options.requireModel)throw error;
     console.warn('Structured meal parse failed; using local parser',{error:error instanceof Error?error.message:String(error)});
-    return parseMealFallback(text);
+    return {title:text.trim().slice(0,200),items:parseMealFallback(text)};
   }
 }
 
-export async function parseMealEvidence(text:string,images:MealImageInput[],options:{apiKey?:string;model?:string}):Promise<ParsedFood[]>{
-  if(!images.length)return parseMealText(text,options);
-  if(!options.apiKey)return text.trim()?parseMealFallback(text):[];
+export async function parseMealBundle(text:string,images:MealImageInput[],options:{apiKey?:string;model?:string;requireModel?:boolean}){
+  if(options.requireModel&&!options.apiKey)throw new Error('Photo interpretation is not configured');
+  if(!images.length)return parseTextBundle(text,options);
+  if(!options.apiKey)return {title:text.trim().slice(0,200),items:text.trim()?parseMealFallback(text):[]};
   try{
     const content:Array<Record<string,string>>=[
       {type:'input_text',text:text.trim()?`User description: ${text.trim()}\nInterpret the description and images as one meal.`:'No description was supplied. Identify the meal from the images.'},
@@ -116,9 +123,17 @@ export async function parseMealEvidence(text:string,images:MealImageInput[],opti
     const response=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{Authorization:`Bearer ${options.apiKey}`,'Content-Type':'application/json'},signal:AbortSignal.timeout(30_000),body:JSON.stringify({model:options.model??'gpt-5.6-luna',instructions:visionInstructions,input:[{role:'user',content}],store:false,text:{format:{type:'json_schema',name:'parsed_meal',strict:true,schema:responseSchema}}})});
     if(!response.ok)throw new Error(`OpenAI vision parse returned ${response.status}`);
     const payload=await response.json() as {output_text?:unknown;output?:Array<{content?:Array<{type?:string;text?:string}>}>};
-    return parsedMealSchema.parse(JSON.parse(outputText(payload))).items;
+    return parsedMealSchema.parse(JSON.parse(outputText(payload)));
   }catch(error){
+    if(options.requireModel)throw error;
     console.warn('Structured photo parse failed; using text fallback',{error:error instanceof Error?error.message:String(error)});
-    return text.trim()?parseMealFallback(text):[];
+    return {title:text.trim().slice(0,200),items:text.trim()?parseMealFallback(text):[]};
   }
+}
+
+export async function parseMealText(text:string,options:{apiKey?:string;model?:string}):Promise<ParsedFood[]>{
+  return (await parseTextBundle(text,options)).items;
+}
+export async function parseMealEvidence(text:string,images:MealImageInput[],options:{apiKey?:string;model?:string}):Promise<ParsedFood[]>{
+  return (await parseMealBundle(text,images,options)).items;
 }

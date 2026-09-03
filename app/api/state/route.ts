@@ -5,8 +5,9 @@ import { requireUser } from '../../lib/auth';
 import { DEFAULT_TIMEZONE, localDateFor } from '../../lib/dates';
 import { actionSchema, capturePayloadSchema, validationError } from '../../lib/schemas';
 import { findLibraryMatch, parseAmount } from '../../lib/resolve/amount';
-import { parseMealEvidence, type MealImageInput } from '../../lib/resolve/parse';
-import { estimateFoods, applyEstimate } from '../../lib/resolve/estimate';
+import { parseMealBundle, type MealImageInput } from '../../lib/resolve/parse';
+import { libraryComponents, mealTitle } from '../../lib/resolve/groups';
+import { estimateFoods, applyEstimate, isComponentMatch } from '../../lib/resolve/estimate';
 
 export const dynamic = 'force-dynamic';
 
@@ -79,11 +80,12 @@ async function getState(userId: string) {
     evidenceByEvent.set(eventId, [...(evidenceByEvent.get(eventId) ?? []), item]);
   }
   const events = eventsResult.results.map((event) => ({
+    title:mealTitle(String(event.title??''),String(event.note),String(event.meal_type)),
     id: String(event.id), occurredAt: String(event.occurred_at), localDate: String(event.local_date), mealType: String(event.meal_type), status: String(event.status), note: String(event.note), createdAt: String(event.created_at),
     items: itemsByEvent.get(String(event.id)) ?? [],
     evidence: evidenceByEvent.get(String(event.id)) ?? [],
   }));
-  const library = libraryResult.results.map((row): LibraryItem => ({ ...mapItem({ ...row, source: 'personal', confidence: 1, completeness: .95 }), kind: String(row.kind) as LibraryItem['kind'], alias: String(row.alias), servingGrams: row.serving_grams == null ? null : Number(row.serving_grams), servingsPerCookedCup: row.servings_per_cooked_cup == null ? null : Number(row.servings_per_cooked_cup), sourceLabel: String(row.source_label ?? ''), sourceUrl: String(row.source_url ?? '') }));
+  const library = libraryResult.results.map((row): LibraryItem => ({ ...mapItem({ ...row, source: 'personal', confidence: 1, completeness: .95 }), components:row.components?JSON.parse(String(row.components)) as FoodItem[]:undefined, kind: String(row.kind) as LibraryItem['kind'], alias: String(row.alias), servingGrams: row.serving_grams == null ? null : Number(row.serving_grams), servingsPerCookedCup: row.servings_per_cooked_cup == null ? null : Number(row.servings_per_cooked_cup), sourceLabel: String(row.source_label ?? ''), sourceUrl: String(row.source_url ?? '') }));
   return { events, library, goals: goal ? { calories: Number(goal.calories), protein: Number(goal.protein), carbs: Number(goal.carbs), fat: Number(goal.fat), fiber: Number(goal.fiber) } : DEFAULT_GOALS, mealTimes:goal?{Breakfast:String(goal.breakfast_time??DEFAULT_MEAL_TIMES.Breakfast),Lunch:String(goal.lunch_time??DEFAULT_MEAL_TIMES.Lunch),Dinner:String(goal.dinner_time??DEFAULT_MEAL_TIMES.Dinner),Snack:String(goal.snack_time??DEFAULT_MEAL_TIMES.Snack)}:DEFAULT_MEAL_TIMES, timezone: String(goal?.timezone ?? DEFAULT_TIMEZONE) };
 }
 
@@ -131,8 +133,11 @@ function toCandidate(result:FoodResearchResult, providerId:'usda'|'off', segment
   return {providerId,externalId:result.id,name:result.name,brand:result.brand||null,servingDescription:`${quantity} ${unit}`,quantity,unit,servingGrams:result.servingGrams,unitGrams:result.unitGrams,nutrients:scaleNutrients(result,compatible?amount.scale!:1),sourceLabel:result.sourceLabel,sourceUrl:result.sourceUrl,matchScore:result.matchScore,dataQuality:providerId==='usda'?'verified':'crowdsourced',assumption:compatible?'Nutrition scaled to your entered portion.':`Portion conversion unavailable; choosing this uses ${result.serving}.`};
 }
 
-async function interpretedItems(text: string, library: LibraryItem[], photos: MealImageInput[]): Promise<FoodItem[]> {
-  const parsedFoods = (text.trim() || photos.length) ? await parseMealEvidence(text,photos,{apiKey:env.OPENAI_API_KEY?.trim(),model:photos.length?(env.OPENAI_VISION_MODEL?.trim()||'gpt-5.6-luna'):env.OPENAI_MODEL?.trim()}):[];
+async function interpretedItems(text: string, library: LibraryItem[], photos: MealImageInput[],requireModel=false) {
+  const savedGroup=!photos.length?library.find(item=>item.components?.length&&[item.name,...item.alias.split(',')].some(name=>name.trim().toLowerCase()===text.trim().toLowerCase())):undefined;
+  if(savedGroup)return {title:savedGroup.name,items:libraryComponents(savedGroup)};
+  const bundle = (text.trim() || photos.length) ? await parseMealBundle(text,photos,{requireModel,apiKey:env.OPENAI_API_KEY?.trim(),model:photos.length?(env.OPENAI_VISION_MODEL?.trim()||'gpt-5.6-luna'):env.OPENAI_MODEL?.trim()}):{title:'',items:[]};
+  const parsedFoods=bundle.items;
   const apiKey=env.USDA_API_KEY?.trim();
   const items:FoodItem[]=[];
   const fromResearch=(segment:string,result:FoodResearchResult,confidence:number):FoodItem=>{
@@ -140,32 +145,33 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
     if (amount.scale == null) return {id:crypto.randomUUID(),name:cleanFoodName(segment),quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0,resolutionTier:'unresolved',unresolvedReason:'unit_mismatch'};
     return{id:crypto.randomUUID(),name:result.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(result,amount.scale),source:result.sourceLabel,sourceUrl:result.sourceUrl,libraryItemId:null,confidence,completeness:known/8,resolutionTier:'structured'};
   };
-  const resolved=await Promise.all(parsedFoods.map(async (parsedFood):Promise<FoodItem>=>{
+  const resolved=await Promise.all(parsedFoods.map(async (parsedFood):Promise<FoodItem[]>=>{
     const items:FoodItem[]=[];
     const segment=parsedFood.rawText;
     const candidates:NonNullable<FoodItem['candidates']>=[];
     const saved = findLibraryMatch(segment, library);
     if (saved) {
       const amount = parsedAmount(segment, saved.quantity, saved.unit, saved);
-      if (amount.scale == null) { items.push({id:crypto.randomUUID(),name:cleanFoodName(segment),quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:saved.id,confidence:0,completeness:0,resolutionTier:'unresolved',unresolvedReason:'unit_mismatch'}); return items[0]; }
-      items.push({ ...saved, id: crypto.randomUUID(), quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(saved, amount.scale), source: 'Personal Library', sourceUrl:saved.sourceUrl, libraryItemId:saved.id, confidence: 1, completeness: .95, resolutionTier:'library' });return items[0];
+      if(saved.components?.length&&amount.scale!=null)return libraryComponents(saved,amount.scale);
+      if (amount.scale == null) { items.push({id:crypto.randomUUID(),name:cleanFoodName(segment),quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:saved.id,confidence:0,completeness:0,resolutionTier:'unresolved',unresolvedReason:'unit_mismatch'}); return items; }
+      items.push({ ...saved, id: crypto.randomUUID(), quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(saved, amount.scale), source: 'Personal Library', sourceUrl:saved.sourceUrl, libraryItemId:saved.id, confidence: 1, completeness: .95, resolutionTier:'library' });return items;
     }
     const query=parsedFood.searchQuery;
     const normalizedQuery=query.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
     const food=catalog.find((item)=>item.terms.some((term)=>item.exact?normalizedQuery===term:normalizedQuery.includes(term)));
     const preferStandard=/^(?:olive oil|parmesan cheese)$/.test(normalizedQuery);
-    if(preferStandard&&food){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:parsedFood.confidence,completeness:.86,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items[0];}}
-    try{if(!apiKey)throw new Error('USDA_API_KEY is not configured');const researched=await researchFoods(query,apiKey,false,8);candidates.push(...researched.results.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'usda',segment)));const result=researched.results.find((candidate)=>candidate.matchScore>=.6&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.95,.7+result.matchScore*.25)),candidates,clarificationQuestion:parsedFood.needsClarification});return items[0];}}
+    if(preferStandard&&food){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:parsedFood.confidence,completeness:.86,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
+    try{if(!apiKey)throw new Error('USDA_API_KEY is not configured');const researched=await researchFoods(query,apiKey,false,8);researched.results=researched.results.filter(candidate=>isComponentMatch(query,candidate.name));candidates.push(...researched.results.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'usda',segment)));const result=researched.results.find((candidate)=>candidate.matchScore>=.6&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.95,.7+result.matchScore*.25)),candidates,clarificationQuestion:parsedFood.needsClarification});return items;}}
     catch(error){console.warn('USDA food resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
-    try{const webResults=await researchOpenFoodFacts(query,6);candidates.push(...webResults.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'off',segment)));const result=webResults.find((candidate)=>candidate.matchScore>=.65&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.86,.55+result.matchScore*.3)),candidates:candidates.slice(0,3),clarificationQuestion:parsedFood.needsClarification});return items[0];}}
+    try{const webResults=(await researchOpenFoodFacts(query,6)).filter(candidate=>isComponentMatch(query,candidate.name));candidates.push(...webResults.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'off',segment)));const result=webResults.find((candidate)=>candidate.matchScore>=.65&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.86,.55+result.matchScore*.3)),candidates:candidates.slice(0,3),clarificationQuestion:parsedFood.needsClarification});return items;}}
     catch(error){console.warn('Open Food Facts resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
-    if(food?.exact){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:Math.min(parsedFood.confidence,.9),completeness:.86,candidates,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items[0];}}
+    if(food?.exact){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:Math.min(parsedFood.confidence,.9),completeness:.86,candidates,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
     const amount={quantity:parsedFood.quantity??1,unit:parsedFood.unit??'serving'};
     const reason=candidates.length?'unit_mismatch':'no_match';
     items.push({id:crypto.randomUUID(),name:parsedFood.name,quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0,candidates:candidates.sort((a,b)=>b.matchScore-a.matchScore).slice(0,3),resolutionTier:'unresolved',unresolvedReason:reason,clarificationQuestion:parsedFood.needsClarification??(candidates.length?'Which of these matches what you ate?':null)});
-    return items[0];
+    return items;
   }));
-  items.push(...resolved);
+  items.push(...resolved.flat());
   const unresolved=items.filter(item=>item.resolutionTier==='unresolved');
   const estimates=await estimateFoods(unresolved,{apiKey:env.OPENAI_API_KEY?.trim(),model:env.OPENAI_VISION_MODEL?.trim()});
   for(let index=0;index<items.length;index++){
@@ -173,12 +179,14 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
     if(choices?.length)items[index]={...applyEstimate(items[index],choices),candidates:[...choices,...(items[index].candidates??[])].slice(0,6)};
   }
   if (!items.length && photos.length) items.push({ id: crypto.randomUUID(), name: 'Meal from photo', quantity: 1, unit: 'serving', calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, iron: null, calcium: null, vitaminC: null, source: 'Photo evidence · needs review', sourceUrl:'', libraryItemId:null, confidence: 0, completeness: 0, resolutionTier:'unresolved', unresolvedReason:'no_match', clarificationQuestion:'The photo could not be interpreted. What foods and approximate portions are visible?' });
-  return items;
+  return {title:bundle.title,items};
 }
 
+function itemStatements(eventId:string,items:FoodItem[],replacingId?:string) {
+  return items.map((item) => env.DB.prepare(`INSERT INTO logged_items (id,event_id,name,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,source,source_url,library_item_id,confidence,completeness,candidates,resolution_tier,unresolved_reason,clarification_question,quoted_source_text) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?${replacingId?' WHERE EXISTS (SELECT 1 FROM logged_items WHERE id=?)':''}`).bind(item.id, eventId, item.name, item.quantity, item.unit, item.calories, item.protein, item.carbs, item.fat, item.fiber, item.iron, item.calcium, item.vitaminC, item.source,item.sourceUrl??'',item.libraryItemId??null,item.confidence,item.completeness,item.candidates?JSON.stringify(item.candidates):null,item.resolutionTier??null,item.unresolvedReason??null,item.clarificationQuestion??null,item.quotedSourceText??null,...(replacingId?[replacingId]:[])));
+}
 async function insertItems(eventId: string, items: FoodItem[]) {
-  if (!items.length) return;
-  await env.DB.batch(items.map((item) => env.DB.prepare(`INSERT INTO logged_items (id,event_id,name,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,source,source_url,library_item_id,confidence,completeness,candidates,resolution_tier,unresolved_reason,clarification_question,quoted_source_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(item.id, eventId, item.name, item.quantity, item.unit, item.calories, item.protein, item.carbs, item.fat, item.fiber, item.iron, item.calcium, item.vitaminC, item.source,item.sourceUrl??'',item.libraryItemId??null,item.confidence,item.completeness,item.candidates?JSON.stringify(item.candidates):null,item.resolutionTier??null,item.unresolvedReason??null,item.clarificationQuestion??null,item.quotedSourceText??null)));
+  if(items.length)await env.DB.batch(itemStatements(eventId,items));
 }
 
 async function saveResolvedItem(item:FoodItem) {
@@ -194,10 +202,10 @@ async function enrichEvent(eventId: string, note: string, library: LibraryItem[]
   try {
     const now = new Date().toISOString();
     await env.DB.prepare(`UPDATE events SET status = 'resolving', updated_at = ? WHERE id = ?`).bind(now, eventId).run();
-    const items = await interpretedItems(note, library, photos);
+    const {items,title} = await interpretedItems(note, library, photos);
     await insertItems(eventId, items);
     const status = items.some((item) => item.resolutionTier === 'unresolved' || item.clarificationQuestion) ? 'needs_attention' : 'estimated';
-    await env.DB.prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?').bind(status, new Date().toISOString(), eventId).run();
+    await env.DB.prepare("UPDATE events SET status=?,title=CASE WHEN title='' THEN ? ELSE title END,updated_at=? WHERE id=?").bind(status,title,new Date().toISOString(),eventId).run();
   } catch (error) {
     console.error('Food enrichment failed', { eventId, error: error instanceof Error ? error.message : String(error) });
     await env.DB.prepare(`UPDATE events SET status = 'needs_attention', updated_at = ? WHERE id = ?`).bind(new Date().toISOString(), eventId).run();
@@ -240,7 +248,7 @@ export async function POST(request: Request) {
     const localDate = localDateFor(occurredAt, timezone);
     const note = [payload.note, payload.transcript].filter(Boolean).join(' ');
     try {
-      await env.DB.prepare(`INSERT INTO events (id,user_id,occurred_at,local_date,meal_type,status,note,idempotency_key,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(id, user.userId, occurredAt, localDate, payload.mealType ?? 'Meal', 'captured', note, payload.idempotencyKey ?? null, now, now).run();
+      await env.DB.prepare(`INSERT INTO events (id,user_id,occurred_at,local_date,meal_type,status,note,idempotency_key,created_at,updated_at,title) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(id, user.userId, occurredAt, localDate, payload.mealType ?? 'Meal', 'captured', note, payload.idempotencyKey ?? null, now, now,payload.title??'').run();
     } catch (error) {
       if (!payload.idempotencyKey) throw error;
       const existing = await env.DB.prepare('SELECT id FROM events WHERE user_id = ? AND idempotency_key = ?').bind(user.userId, payload.idempotencyKey).first<D1Row>();
@@ -277,7 +285,40 @@ export async function POST(request: Request) {
   const body = parsedBody.data;
   const action = body.action;
   const ownedEvent = async (eventId: string) => env.DB.prepare('SELECT id FROM events WHERE id = ? AND user_id = ?').bind(eventId, user.userId).first();
-  if (action === 'verify' && await ownedEvent(String(body.eventId))) {
+  if(action==='rename_event'){
+    if(!await ownedEvent(body.eventId))return Response.json({error:'Meal not found'},{status:404});
+    await env.DB.prepare('UPDATE events SET title=?,updated_at=? WHERE id=?').bind(body.title,new Date().toISOString(),body.eventId).run();
+  } else if(action==='break_item'){
+    const row=await env.DB.prepare('SELECT li.*,e.user_id FROM logged_items li JOIN events e ON e.id=li.event_id WHERE li.id=?').bind(body.itemId).first<D1Row>();
+    if(row?.user_id!==user.userId)return Response.json({error:'Food not found'},{status:404});
+    const evidence=await env.DB.prepare("SELECT storage_key,mime_type FROM evidence WHERE event_id=? AND type='photo' ORDER BY sort_order LIMIT 6").bind(row.event_id).all<D1Row>();
+    const photos:MealImageInput[]=[];
+    for(const photo of evidence.results){
+      const object=photo.storage_key?await env.FILES.get(String(photo.storage_key)):null;
+      if(!object)continue;
+      const bytes=new Uint8Array(await object.arrayBuffer());let binary='';
+      for(let offset=0;offset<bytes.length;offset+=8192)binary+=String.fromCharCode(...bytes.subarray(offset,offset+8192));
+      photos.push({mimeType:String(photo.mime_type) as MealImageInput['mimeType'],base64:btoa(binary)});
+    }
+    const others=await env.DB.prepare('SELECT name FROM logged_items WHERE event_id=? AND id!=?').bind(row.event_id,body.itemId).all<D1Row>();
+    const description=`Break ONLY this target food into its editable ingredients: ${body.quantity} ${body.unit} ${body.name}. Use the photos if supplied to identify its layers, not other foods in the photo. Do not include the complete dish as an item. Additional information: ${body.details||'none'}. Other existing entries, which must not be recreated: ${others.results.map(x=>x.name).join(', ')||'none'}. Include all of the target's own ingredients even when they share names with those other entries. If this is already an indivisible ingredient, return just that ingredient.`;
+    let items:FoodItem[];
+    try{items=(await interpretedItems(description,[],photos,true)).items;}
+    catch{return Response.json({error:'Ingredient interpretation is unavailable right now. Nothing was replaced; please try again.'},{status:503});}
+    if(items.length<2||items.some(x=>x.resolutionTier==='unresolved'))return Response.json({error:'Could not confidently break this food into estimated ingredients. Nothing was replaced. Add details and try again.'},{status:422});
+    const current=await env.DB.prepare('SELECT * FROM logged_items WHERE id=?').bind(body.itemId).first<D1Row>();
+    if(!current||JSON.stringify(mapItem(current))!==JSON.stringify(mapItem(row)))return Response.json({error:'This food changed while processing. Refresh and try again.'},{status:409});
+    await env.DB.batch([...itemStatements(String(row.event_id),items,body.itemId),env.DB.prepare('DELETE FROM logged_items WHERE id=?').bind(body.itemId),env.DB.prepare("UPDATE events SET title=CASE WHEN title='' THEN ? ELSE title END WHERE id=?").bind(body.name,row.event_id)]);
+    await refreshEventStatus(String(row.event_id));
+  } else if(action==='log_library'){
+    const state=await getState(user.userId);const saved=state.library.find(x=>x.id===body.itemId);
+    if(!saved)return Response.json({error:'Library meal not found'},{status:404});
+    const id=crypto.randomUUID(),now=new Date().toISOString();
+    const parts=saved.components?.length?libraryComponents(saved):[{...saved,id:crypto.randomUUID(),source:'Personal Library',libraryItemId:saved.id,confidence:1,completeness:.95,resolutionTier:'library' as const}];
+    await env.DB.batch([env.DB.prepare('INSERT INTO events (id,user_id,occurred_at,local_date,meal_type,status,note,created_at,updated_at,title) VALUES (?,?,?,?,?,?,?,?,?,?)').bind(id,user.userId,body.occurredAt,localDateFor(body.occurredAt,state.timezone),body.mealType,'estimated','',now,now,saved.name),...itemStatements(id,parts)]);
+    await refreshEventStatus(id);
+    return Response.json({ok:true,id});
+  } else if (action === 'verify' && await ownedEvent(String(body.eventId))) {
     await env.DB.prepare(`UPDATE events SET status = 'verified', updated_at = ? WHERE id = ?`).bind(new Date().toISOString(), body.eventId).run();
   } else if (action === 'update_event' && await ownedEvent(String(body.eventId))) {
     const settings = await env.DB.prepare('SELECT timezone FROM goals WHERE user_id = ?').bind(user.userId).first<D1Row>();
@@ -296,7 +337,7 @@ export async function POST(request: Request) {
   } else if (action === 'add_foods') {
     if(!await ownedEvent(body.eventId))return Response.json({error:'Meal not found'},{status:404});
     const state=await getState(user.userId);
-    const additions=await interpretedItems(body.description,state.library,[]);
+    const {items:additions}=await interpretedItems(body.description,state.library,[]);
     if(!additions.length)return Response.json({error:'No foods found. Try a food name and portion, or add it manually.'},{status:422});
     await insertItems(body.eventId,additions);
     await refreshEventStatus(body.eventId);
@@ -337,7 +378,7 @@ export async function POST(request: Request) {
     const sourceItems = await env.DB.prepare('SELECT * FROM logged_items WHERE event_id = ?').bind(body.eventId).all<D1Row>();
     const id = crypto.randomUUID(); const now = new Date().toISOString();
     const settings = await env.DB.prepare('SELECT timezone FROM goals WHERE user_id = ?').bind(user.userId).first<D1Row>();
-    await env.DB.prepare(`INSERT INTO events (id,user_id,occurred_at,local_date,meal_type,status,note,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(id,user.userId,now,localDateFor(now,String(settings?.timezone ?? DEFAULT_TIMEZONE)),source?.meal_type ?? 'Meal','verified',source?.note ?? '',now,now).run();
+    await env.DB.prepare(`INSERT INTO events (id,user_id,occurred_at,local_date,meal_type,status,note,created_at,updated_at,title) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(id,user.userId,now,localDateFor(now,String(settings?.timezone ?? DEFAULT_TIMEZONE)),source?.meal_type ?? 'Meal','estimated',source?.note ?? '',now,now,source?.title??'').run();
     await insertItems(id, sourceItems.results.map((row) => ({ ...mapItem(row), id: crypto.randomUUID() })));
   } else if (action === 'save_library') {
     const item = body.item as LibraryItem; const now = new Date().toISOString();
@@ -346,13 +387,17 @@ export async function POST(request: Request) {
     await env.DB.prepare('DELETE FROM library_items WHERE id = ? AND user_id = ?').bind(String(body.itemId),user.userId).run();
   } else if(action==='update_library_from_item'){
     const item=body.item as FoodItem;const libraryItemId=String(body.libraryItemId);
+    const group=await env.DB.prepare('SELECT components FROM library_items WHERE id=? AND user_id=?').bind(libraryItemId,user.userId).first<D1Row>();
+    if(group?.components)return Response.json({error:'This Library entry is a meal group. Log it, edit its ingredients, then save the whole meal.'},{status:400});
     await env.DB.prepare(`UPDATE library_items SET name=?,quantity=?,unit=?,calories=?,protein=?,carbs=?,fat=?,fiber=?,iron=?,calcium=?,vitamin_c=? WHERE id=? AND user_id=?`).bind(item.name,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,libraryItemId,user.userId).run();
   } else if (action === 'save_event_to_library' && await ownedEvent(String(body.eventId))) {
     const event = await env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(body.eventId).first<D1Row>();
     const rows = await env.DB.prepare('SELECT * FROM logged_items WHERE event_id = ?').bind(body.eventId).all<D1Row>();
     const totals = rows.results.map(mapItem).reduce<Nutrients>((sum, item) => ({ calories: sum.calories+item.calories, protein: sum.protein+item.protein, carbs: sum.carbs+item.carbs, fat: sum.fat+item.fat, fiber: sum.fiber+item.fiber, iron: sum.iron==null&&item.iron==null?null:(sum.iron??0)+(item.iron??0), calcium: sum.calcium==null&&item.calcium==null?null:(sum.calcium??0)+(item.calcium??0), vitaminC: sum.vitaminC==null&&item.vitaminC==null?null:(sum.vitaminC??0)+(item.vitaminC??0) }), { calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null });
-    const name = String(body.name ?? event?.note ?? 'Saved meal');
-    await env.DB.prepare(`INSERT INTO library_items (id,user_id,name,kind,alias,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,serving_grams,servings_per_cooked_cup,source_label,source_url,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.userId,name,'meal',name.toLowerCase(),1,'meal',totals.calories,totals.protein,totals.carbs,totals.fat,totals.fiber,totals.iron,totals.calcium,totals.vitaminC,null,null,'Personal meal','',new Date().toISOString()).run();
+    if(!rows.results.length)return Response.json({error:'Add ingredients before saving this meal to the Library.'},{status:422});
+    const name=mealTitle(body.name||String(event?.title??''),String(event?.note??''),String(event?.meal_type??'Saved'));
+    await env.DB.prepare(`INSERT INTO library_items (id,user_id,name,kind,alias,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,serving_grams,servings_per_cooked_cup,source_label,source_url,created_at,components) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.userId,name,'meal',name.toLowerCase(),1,'meal',totals.calories,totals.protein,totals.carbs,totals.fat,totals.fiber,totals.iron,totals.calcium,totals.vitaminC,null,null,'Personal meal · saved ingredients','',new Date().toISOString(),JSON.stringify(rows.results.map(mapItem))).run();
+    if(body.name?.trim())await env.DB.prepare('UPDATE events SET title=?,updated_at=? WHERE id=?').bind(name,new Date().toISOString(),body.eventId).run();
   } else if (action === 'save_goals') {
     const goals = body.goals;
     const mealTimes = { ...DEFAULT_MEAL_TIMES, ...body.mealTimes };

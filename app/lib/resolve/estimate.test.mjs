@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {estimateFoods,applyEstimate} from './estimate.ts';
+import {estimateFoods,applyEstimate,isComponentMatch} from './estimate.ts';
 import {withQuantity} from './portion.ts';
 
 const item={id:'bagel',name:'whole wheat bagel',quantity:2,unit:'bagels',calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0,resolutionTier:'unresolved'};
 const best={name:'Whole wheat bagel',quantity:2,unit:'bagels',assumption:'Two medium bagels, about 100 g each.',calories:500,protein:20,carbs:96,fat:4,fiber:12};
+
+test('ingredient alternatives cannot quietly become whole sandwiches',()=>{
+  assert.equal(isComponentMatch('bagel','Egg and cheese sandwich'),false);
+  assert.equal(isComponentMatch('bagel','Bagel with cream cheese'),false);
+  assert.equal(isComponentMatch('bagel','Whole wheat bagel'),true);
+  assert.equal(isComponentMatch('egg salad','Egg salad'),true);
+});
 
 test('fills unresolved nutrition with a labeled estimate and portion-specific alternatives',async()=>{
   const original=globalThis.fetch;

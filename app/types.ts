@@ -53,6 +53,7 @@ export type Evidence = {
 };
 
 export type EatingEvent = {
+  title?: string;
   id: string;
   occurredAt: string;
   mealType: string;
@@ -65,6 +66,7 @@ export type EatingEvent = {
 };
 
 export type LibraryItem = Nutrients & {
+  components?: FoodItem[];
   id: string;
   name: string;
   kind: 'food' | 'recipe' | 'meal';

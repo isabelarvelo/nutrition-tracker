@@ -13,6 +13,12 @@ const estimateSchema = z.object({ foods: z.array(z.object({
   })).min(1).max(3),
 })).max(30) });
 
+export function isComponentMatch(query:string,name:string){
+  const composite=/\b(sandwich(?:es)?|burgers?|wraps?|pizza|omelettes?|omelets?|salads?|bowls?)\b/gi;
+  const addedDish=(name.match(composite)??[]).some(word=>!query.toLowerCase().includes(word.toLowerCase().replace(/s$/,'')));
+  return !addedDish&&(!/\bwith\b/i.test(name)||/\bwith\b/i.test(query));
+}
+
 export async function estimateFoods(foods: Pick<FoodItem, 'id' | 'name' | 'quantity' | 'unit'>[], options: {apiKey?: string; model?: string}): Promise<Map<string, NutritionCandidate[]>> {
   const results = new Map<string, NutritionCandidate[]>();
   if (!foods.length || !options.apiKey) return results;
@@ -38,7 +44,8 @@ These are AI estimates, not sourced facts. Do not fabricate brands, citations or
     const parsed = estimateSchema.parse(JSON.parse(output || ''));
     for (const food of parsed.foods) {
       if (!foods.some(input=>input.id===food.id) || results.has(food.id)) continue;
-      results.set(food.id, food.options.map((option,index)=>({
+      const requested=foods.find(input=>input.id===food.id)!;
+      results.set(food.id, food.options.filter(option=>isComponentMatch(requested.name,option.name)).map((option,index)=>({
         providerId: 'estimate', externalId: `${food.id}-${index}`, name: option.name, brand: null,
         servingDescription: `${option.quantity} ${option.unit}`, quantity: option.quantity, unit: option.unit,
         servingGrams: null, unitGrams: {},

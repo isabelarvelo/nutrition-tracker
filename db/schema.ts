@@ -1,6 +1,7 @@
 import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const events = sqliteTable('events', {
+  title: text('title').notNull().default(''),
   id: text('id').primaryKey(), userId: text('user_id').notNull(), occurredAt: text('occurred_at').notNull(), localDate: text('local_date').notNull().default('1970-01-01'), mealType: text('meal_type').notNull(), status: text('status').notNull(), note: text('note').notNull().default(''), idempotencyKey: text('idempotency_key'), createdAt: text('created_at').notNull(), updatedAt: text('updated_at').notNull(),
 }, (table) => [index('idx_events_user_time').on(table.userId, table.occurredAt), index('idx_events_user_local_date').on(table.userId, table.localDate), uniqueIndex('idx_events_user_idempotency').on(table.userId, table.idempotencyKey)]);
 
@@ -13,6 +14,7 @@ export const loggedItems = sqliteTable('logged_items', {
 }, (table) => [index('idx_logged_items_event').on(table.eventId)]);
 
 export const libraryItems = sqliteTable('library_items', {
+  components: text('components'),
   id: text('id').primaryKey(), userId: text('user_id').notNull(), name: text('name').notNull(), kind: text('kind').notNull(), alias: text('alias').notNull().default(''), quantity: real('quantity').notNull(), unit: text('unit').notNull(), calories: real('calories').notNull(), protein: real('protein').notNull(), carbs: real('carbs').notNull(), fat: real('fat').notNull(), fiber: real('fiber').notNull(), iron: real('iron'), calcium: real('calcium'), vitaminC: real('vitamin_c'), servingGrams: real('serving_grams'), servingsPerCookedCup: real('servings_per_cooked_cup'), sourceLabel: text('source_label').notNull().default(''), sourceUrl: text('source_url').notNull().default(''), createdAt: text('created_at').notNull(),
 }, (table) => [index('idx_library_user').on(table.userId)]);
 
