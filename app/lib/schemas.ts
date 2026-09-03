@@ -30,7 +30,7 @@ export const foodItemSchema = nutrientsSchema.extend({
 });
 
 export const nutritionCandidateSchema = z.object({
-  providerId: z.enum(['library', 'fatsecret', 'usda', 'off', 'web']),
+  providerId: z.enum(['library', 'fatsecret', 'usda', 'off', 'web', 'estimate']),
   externalId: id,
   name: z.string().trim().min(1).max(200),
   brand: shortText.nullable(),
@@ -41,7 +41,10 @@ export const nutritionCandidateSchema = z.object({
   sourceLabel: shortText,
   sourceUrl: z.union([z.url().max(2_000), z.literal('')]),
   matchScore: z.number().finite().min(0).max(1),
-  dataQuality: z.enum(['verified', 'crowdsourced', 'extracted']),
+  dataQuality: z.enum(['verified', 'crowdsourced', 'extracted', 'estimated']),
+  quantity: z.number().finite().positive().max(20000).optional(),
+  unit: z.string().trim().min(1).max(80).optional(),
+  assumption: z.string().max(300).optional(),
 });
 
 export const libraryItemSchema = nutrientsSchema.extend({
@@ -78,6 +81,8 @@ export const actionSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('update_event'), eventId: id, occurredAt: z.iso.datetime(), mealType: shortText, note: z.string().max(10_000) }),
   z.object({ action: z.literal('update_item'), item: foodItemSchema }),
   z.object({ action: z.literal('add_item'), eventId: id, item: foodItemSchema }),
+  z.object({ action: z.literal('add_foods'), eventId: id, description: z.string().trim().min(1).max(2000) }),
+  z.object({ action: z.literal('estimate_item'), itemId: id, name: z.string().trim().min(1).max(200), quantity: z.number().finite().positive().max(20000), unit: z.string().trim().min(1).max(80) }),
   z.object({ action: z.literal('delete_item'), itemId: id }),
   z.object({ action: z.literal('resolve_candidate'), itemId: id, candidate: nutritionCandidateSchema }),
   z.object({ action: z.literal('delete_event'), eventId: id }),

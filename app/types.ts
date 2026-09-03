@@ -20,14 +20,14 @@ export type FoodItem = Nutrients & {
   confidence: number;
   completeness: number;
   candidates?: NutritionCandidate[];
-  resolutionTier?: 'library' | 'structured' | 'web' | 'unresolved' | null;
+  resolutionTier?: 'library' | 'structured' | 'web' | 'estimated' | 'unresolved' | null;
   unresolvedReason?: 'no_match' | 'unit_mismatch' | 'ambiguous_serving' | null;
   clarificationQuestion?: string | null;
   quotedSourceText?: string | null;
 };
 
 export type NutritionCandidate = {
-  providerId: 'library' | 'fatsecret' | 'usda' | 'off' | 'web';
+  providerId: 'library' | 'fatsecret' | 'usda' | 'off' | 'web' | 'estimate';
   externalId: string;
   name: string;
   brand: string | null;
@@ -38,7 +38,10 @@ export type NutritionCandidate = {
   sourceLabel: string;
   sourceUrl: string;
   matchScore: number;
-  dataQuality: 'verified' | 'crowdsourced' | 'extracted';
+  dataQuality: 'verified' | 'crowdsourced' | 'extracted' | 'estimated';
+  quantity?: number;
+  unit?: string;
+  assumption?: string;
 };
 
 export type Evidence = {

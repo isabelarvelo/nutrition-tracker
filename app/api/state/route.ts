@@ -6,7 +6,7 @@ import { DEFAULT_TIMEZONE, localDateFor } from '../../lib/dates';
 import { actionSchema, capturePayloadSchema, validationError } from '../../lib/schemas';
 import { findLibraryMatch, parseAmount } from '../../lib/resolve/amount';
 import { parseMealEvidence, type MealImageInput } from '../../lib/resolve/parse';
-import { getRequestExecutionContext } from 'vinext/shims/request-context';
+import { estimateFoods, applyEstimate } from '../../lib/resolve/estimate';
 
 export const dynamic = 'force-dynamic';
 
@@ -123,8 +123,12 @@ function canApplyServing(segment:string,result:FoodResearchResult){
   return Boolean(result.servingGrams&&result.unitGrams[unit]);
 }
 
-function toCandidate(result:FoodResearchResult, providerId:'usda'|'off'):NonNullable<FoodItem['candidates']>[number]{
-  return {providerId,externalId:result.id,name:result.name,brand:result.brand||null,servingDescription:result.serving,servingGrams:result.servingGrams,unitGrams:result.unitGrams,nutrients:{calories:result.calories,protein:result.protein,carbs:result.carbs,fat:result.fat,fiber:result.fiber,iron:result.iron,calcium:result.calcium,vitaminC:result.vitaminC},sourceLabel:result.sourceLabel,sourceUrl:result.sourceUrl,matchScore:result.matchScore,dataQuality:providerId==='usda'?'verified':'crowdsourced'};
+function toCandidate(result:FoodResearchResult, providerId:'usda'|'off', segment:string):NonNullable<FoodItem['candidates']>[number]{
+  const amount=parsedAmount(segment,result.servingQuantity,result.servingUnit,result);
+  const compatible=canApplyServing(segment,result)&&amount.scale!=null;
+  const quantity=compatible?amount.quantity:result.servingQuantity;
+  const unit=compatible?amount.unit:result.servingUnit;
+  return {providerId,externalId:result.id,name:result.name,brand:result.brand||null,servingDescription:`${quantity} ${unit}`,quantity,unit,servingGrams:result.servingGrams,unitGrams:result.unitGrams,nutrients:scaleNutrients(result,compatible?amount.scale!:1),sourceLabel:result.sourceLabel,sourceUrl:result.sourceUrl,matchScore:result.matchScore,dataQuality:providerId==='usda'?'verified':'crowdsourced',assumption:compatible?'Nutrition scaled to your entered portion.':`Portion conversion unavailable; choosing this uses ${result.serving}.`};
 }
 
 async function interpretedItems(text: string, library: LibraryItem[], photos: MealImageInput[]): Promise<FoodItem[]> {
@@ -136,28 +140,37 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
     if (amount.scale == null) return {id:crypto.randomUUID(),name:cleanFoodName(segment),quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0,resolutionTier:'unresolved',unresolvedReason:'unit_mismatch'};
     return{id:crypto.randomUUID(),name:result.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(result,amount.scale),source:result.sourceLabel,sourceUrl:result.sourceUrl,libraryItemId:null,confidence,completeness:known/8,resolutionTier:'structured'};
   };
-  for(const parsedFood of parsedFoods){
+  const resolved=await Promise.all(parsedFoods.map(async (parsedFood):Promise<FoodItem>=>{
+    const items:FoodItem[]=[];
     const segment=parsedFood.rawText;
     const candidates:NonNullable<FoodItem['candidates']>=[];
     const saved = findLibraryMatch(segment, library);
     if (saved) {
       const amount = parsedAmount(segment, saved.quantity, saved.unit, saved);
-      if (amount.scale == null) { items.push({id:crypto.randomUUID(),name:cleanFoodName(segment),quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:saved.id,confidence:0,completeness:0,resolutionTier:'unresolved',unresolvedReason:'unit_mismatch'}); continue; }
-      items.push({ ...saved, id: crypto.randomUUID(), quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(saved, amount.scale), source: 'Personal Library', sourceUrl:saved.sourceUrl, libraryItemId:saved.id, confidence: 1, completeness: .95, resolutionTier:'library' });continue;
+      if (amount.scale == null) { items.push({id:crypto.randomUUID(),name:cleanFoodName(segment),quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:saved.id,confidence:0,completeness:0,resolutionTier:'unresolved',unresolvedReason:'unit_mismatch'}); return items[0]; }
+      items.push({ ...saved, id: crypto.randomUUID(), quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(saved, amount.scale), source: 'Personal Library', sourceUrl:saved.sourceUrl, libraryItemId:saved.id, confidence: 1, completeness: .95, resolutionTier:'library' });return items[0];
     }
     const query=parsedFood.searchQuery;
     const normalizedQuery=query.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
     const food=catalog.find((item)=>item.terms.some((term)=>item.exact?normalizedQuery===term:normalizedQuery.includes(term)));
     const preferStandard=/^(?:olive oil|parmesan cheese)$/.test(normalizedQuery);
-    if(preferStandard&&food){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:parsedFood.confidence,completeness:.86,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});continue;}}
-    try{if(!apiKey)throw new Error('USDA_API_KEY is not configured');const researched=await researchFoods(query,apiKey,false,8);candidates.push(...researched.results.slice(0,3).map((candidate)=>toCandidate(candidate,'usda')));const result=researched.results.find((candidate)=>candidate.matchScore>=.6&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push(fromResearch(segment,result,Math.min(.95,.7+result.matchScore*.25)));continue;}}
+    if(preferStandard&&food){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:parsedFood.confidence,completeness:.86,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items[0];}}
+    try{if(!apiKey)throw new Error('USDA_API_KEY is not configured');const researched=await researchFoods(query,apiKey,false,8);candidates.push(...researched.results.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'usda',segment)));const result=researched.results.find((candidate)=>candidate.matchScore>=.6&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.95,.7+result.matchScore*.25)),candidates,clarificationQuestion:parsedFood.needsClarification});return items[0];}}
     catch(error){console.warn('USDA food resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
-    try{const webResults=await researchOpenFoodFacts(query,6);candidates.push(...webResults.slice(0,3).map((candidate)=>toCandidate(candidate,'off')));const result=webResults.find((candidate)=>candidate.matchScore>=.65&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push(fromResearch(segment,result,Math.min(.86,.55+result.matchScore*.3)));continue;}}
+    try{const webResults=await researchOpenFoodFacts(query,6);candidates.push(...webResults.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'off',segment)));const result=webResults.find((candidate)=>candidate.matchScore>=.65&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.86,.55+result.matchScore*.3)),candidates:candidates.slice(0,3),clarificationQuestion:parsedFood.needsClarification});return items[0];}}
     catch(error){console.warn('Open Food Facts resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
-    if(food){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:Boolean(food.sourceLabel?.startsWith('USDA'))?0.9:0.72,completeness:.86,resolutionTier:'structured'});continue;}}
-    const amount=parsedAmount(segment,1,'serving');
+    if(food?.exact){const amount=parsedAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:Math.min(parsedFood.confidence,.9),completeness:.86,candidates,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items[0];}}
+    const amount={quantity:parsedFood.quantity??1,unit:parsedFood.unit??'serving'};
     const reason=candidates.length?'unit_mismatch':'no_match';
     items.push({id:crypto.randomUUID(),name:parsedFood.name,quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0,candidates:candidates.sort((a,b)=>b.matchScore-a.matchScore).slice(0,3),resolutionTier:'unresolved',unresolvedReason:reason,clarificationQuestion:parsedFood.needsClarification??(candidates.length?'Which of these matches what you ate?':null)});
+    return items[0];
+  }));
+  items.push(...resolved);
+  const unresolved=items.filter(item=>item.resolutionTier==='unresolved');
+  const estimates=await estimateFoods(unresolved,{apiKey:env.OPENAI_API_KEY?.trim(),model:env.OPENAI_VISION_MODEL?.trim()});
+  for(let index=0;index<items.length;index++){
+    const choices=estimates.get(items[index].id);
+    if(choices?.length)items[index]={...applyEstimate(items[index],choices),candidates:[...choices,...(items[index].candidates??[])].slice(0,6)};
   }
   if (!items.length && photos.length) items.push({ id: crypto.randomUUID(), name: 'Meal from photo', quantity: 1, unit: 'serving', calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, iron: null, calcium: null, vitaminC: null, source: 'Photo evidence · needs review', sourceUrl:'', libraryItemId:null, confidence: 0, completeness: 0, resolutionTier:'unresolved', unresolvedReason:'no_match', clarificationQuestion:'The photo could not be interpreted. What foods and approximate portions are visible?' });
   return items;
@@ -166,6 +179,15 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
 async function insertItems(eventId: string, items: FoodItem[]) {
   if (!items.length) return;
   await env.DB.batch(items.map((item) => env.DB.prepare(`INSERT INTO logged_items (id,event_id,name,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,source,source_url,library_item_id,confidence,completeness,candidates,resolution_tier,unresolved_reason,clarification_question,quoted_source_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(item.id, eventId, item.name, item.quantity, item.unit, item.calories, item.protein, item.carbs, item.fat, item.fiber, item.iron, item.calcium, item.vitaminC, item.source,item.sourceUrl??'',item.libraryItemId??null,item.confidence,item.completeness,item.candidates?JSON.stringify(item.candidates):null,item.resolutionTier??null,item.unresolvedReason??null,item.clarificationQuestion??null,item.quotedSourceText??null)));
+}
+
+async function saveResolvedItem(item:FoodItem) {
+  await env.DB.prepare(`UPDATE logged_items SET name=?,quantity=?,unit=?,calories=?,protein=?,carbs=?,fat=?,fiber=?,iron=?,calcium=?,vitamin_c=?,source=?,source_url=?,library_item_id=?,confidence=?,completeness=?,candidates=?,resolution_tier=?,unresolved_reason=?,clarification_question=? WHERE id=?`).bind(item.name,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,item.source,item.sourceUrl,item.libraryItemId,item.confidence,item.completeness,item.candidates?JSON.stringify(item.candidates):null,item.resolutionTier??null,item.unresolvedReason??null,item.clarificationQuestion??null,item.id).run();
+}
+
+async function refreshEventStatus(eventId:string) {
+  const attention=await env.DB.prepare(`SELECT COUNT(*) AS count FROM logged_items WHERE event_id=? AND (resolution_tier='unresolved' OR clarification_question IS NOT NULL)`).bind(eventId).first<{count:number}>();
+  await env.DB.prepare('UPDATE events SET status=?,updated_at=? WHERE id=?').bind(Number(attention?.count??0)>0?'needs_attention':'estimated',new Date().toISOString(),eventId).run();
 }
 
 async function enrichEvent(eventId: string, note: string, library: LibraryItem[], photos: MealImageInput[]) {
@@ -241,11 +263,10 @@ export async function POST(request: Request) {
     }
     if (evidenceStatements.length) await env.DB.batch(evidenceStatements);
     const state = await getState(user.userId);
-    const enrichment = enrichEvent(id, note, state.library, visionPhotos);
-    const context = getRequestExecutionContext();
-    if (context) context.waitUntil(enrichment);
-    else await enrichment;
-    return Response.json({ ok: true, id, status: context ? 'captured' : 'resolved' }, { status: 202 });
+    // Keep the request alive through lookup and estimation; waitUntil work can be
+    // terminated 30 seconds after a response, leaving longer meals half-resolved.
+    await enrichEvent(id, note, state.library, visionPhotos);
+    return Response.json({ ok: true, id, status: 'resolved' }, { status: 201 });
   }
 
   let rawBody: unknown;
@@ -263,24 +284,45 @@ export async function POST(request: Request) {
     await env.DB.prepare(`UPDATE events SET occurred_at = ?, local_date = ?, meal_type = ?, note = ?, updated_at = ? WHERE id = ?`).bind(body.occurredAt,localDateFor(body.occurredAt,String(settings?.timezone ?? DEFAULT_TIMEZONE)),body.mealType,body.note,new Date().toISOString(),body.eventId).run();
   } else if (action === 'update_item') {
     const item = body.item as FoodItem;
-    const row = await env.DB.prepare('SELECT e.user_id FROM logged_items li JOIN events e ON e.id = li.event_id WHERE li.id = ?').bind(item.id).first<D1Row>();
-    if (row?.user_id === user.userId) await env.DB.prepare(`UPDATE logged_items SET name=?,quantity=?,unit=?,calories=?,protein=?,carbs=?,fat=?,fiber=?,iron=?,calcium=?,vitamin_c=? WHERE id=?`).bind(item.name,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,item.id).run();
+    const row = await env.DB.prepare('SELECT e.user_id,li.event_id FROM logged_items li JOIN events e ON e.id = li.event_id WHERE li.id = ?').bind(item.id).first<D1Row>();
+    if (row?.user_id === user.userId) {
+      await saveResolvedItem({...item,source:'Manually edited',sourceUrl:'',libraryItemId:null,confidence:1,completeness:(5+[item.iron,item.calcium,item.vitaminC].filter(x=>x!=null).length)/8,resolutionTier:'structured',clarificationQuestion:null});
+      await refreshEventStatus(String(row.event_id));
+    }
   } else if (action === 'add_item' && await ownedEvent(String(body.eventId))) {
     const item = body.item as FoodItem;
     await insertItems(String(body.eventId), [{ ...item, id: crypto.randomUUID(), source: item.source || 'Manual entry',sourceUrl:item.sourceUrl||'',libraryItemId:item.libraryItemId??null, confidence: item.confidence ?? 1, completeness: item.completeness ?? 1 }]);
+    await refreshEventStatus(body.eventId);
+  } else if (action === 'add_foods') {
+    if(!await ownedEvent(body.eventId))return Response.json({error:'Meal not found'},{status:404});
+    const state=await getState(user.userId);
+    const additions=await interpretedItems(body.description,state.library,[]);
+    if(!additions.length)return Response.json({error:'No foods found. Try a food name and portion, or add it manually.'},{status:422});
+    await insertItems(body.eventId,additions);
+    await refreshEventStatus(body.eventId);
+  } else if (action === 'estimate_item') {
+    const row=await env.DB.prepare('SELECT li.*,e.user_id FROM logged_items li JOIN events e ON e.id=li.event_id WHERE li.id=?').bind(body.itemId).first<D1Row>();
+    if(row?.user_id!==user.userId)return Response.json({error:'Food not found'},{status:404});
+    const item={...mapItem(row),name:body.name,quantity:body.quantity,unit:body.unit};
+    const estimates=await estimateFoods([item],{apiKey:env.OPENAI_API_KEY?.trim(),model:env.OPENAI_VISION_MODEL?.trim()});
+    const choices=estimates.get(item.id);
+    if(!choices?.length)return Response.json({error:'Could not estimate this food right now. Your existing values are unchanged. Try again or enter values manually.'},{status:503});
+    await saveResolvedItem(applyEstimate(item,choices));
+    await refreshEventStatus(String(row.event_id));
   } else if (action === 'delete_item') {
     const itemId = String(body.itemId);
     const row = await env.DB.prepare('SELECT e.user_id FROM logged_items li JOIN events e ON e.id = li.event_id WHERE li.id = ?').bind(itemId).first<D1Row>();
     if (row?.user_id === user.userId) await env.DB.prepare('DELETE FROM logged_items WHERE id = ?').bind(itemId).run();
   } else if (action === 'resolve_candidate') {
     const candidate=body.candidate;
-    const row=await env.DB.prepare('SELECT li.event_id,e.user_id FROM logged_items li JOIN events e ON e.id=li.event_id WHERE li.id=?').bind(body.itemId).first<D1Row>();
+    const row=await env.DB.prepare('SELECT li.*,e.user_id FROM logged_items li JOIN events e ON e.id=li.event_id WHERE li.id=?').bind(body.itemId).first<D1Row>();
     if(row?.user_id===user.userId){
-      const nutrients=candidate.nutrients;const completeness=(5+[nutrients.iron,nutrients.calcium,nutrients.vitaminC].filter((value)=>value!=null).length)/8;
-      await env.DB.prepare(`UPDATE logged_items SET name=?,quantity=1,unit=?,calories=?,protein=?,carbs=?,fat=?,fiber=?,iron=?,calcium=?,vitamin_c=?,source=?,source_url=?,confidence=?,completeness=?,candidates=NULL,resolution_tier='structured',unresolved_reason=NULL,clarification_question=NULL WHERE id=?`).bind(candidate.name,candidate.servingDescription,nutrients.calories,nutrients.protein,nutrients.carbs,nutrients.fat,nutrients.fiber,nutrients.iron,nutrients.calcium,nutrients.vitaminC,candidate.sourceLabel,candidate.sourceUrl,Math.min(.95,.65+candidate.matchScore*.3),completeness,body.itemId).run();
-      const attention=await env.DB.prepare(`SELECT COUNT(*) AS count FROM logged_items WHERE event_id=? AND (resolution_tier='unresolved' OR clarification_question IS NOT NULL)`).bind(row.event_id).first<{count:number}>();
-      if(Number(attention?.count??0)===0)await env.DB.prepare(`UPDATE events SET status='estimated',updated_at=? WHERE id=? AND status!='verified'`).bind(new Date().toISOString(),row.event_id).run();
-      else await env.DB.prepare(`UPDATE events SET status='needs_attention',updated_at=? WHERE id=? AND status!='verified'`).bind(new Date().toISOString(),row.event_id).run();
+      const stored=parseCandidates(row.candidates);
+      const selected=stored?.find(option=>option.externalId===candidate.externalId&&option.providerId===candidate.providerId);
+      if(!selected)return Response.json({error:'This option is no longer available. Refresh the meal and try again.'},{status:409});
+      const nutrients=selected.nutrients;const completeness=(5+[nutrients.iron,nutrients.calcium,nutrients.vitaminC].filter((value)=>value!=null).length)/8;
+      await saveResolvedItem({...mapItem(row),...nutrients,name:selected.name,quantity:selected.quantity??1,unit:selected.unit??selected.servingDescription,source:selected.sourceLabel,sourceUrl:selected.sourceUrl,libraryItemId:null,confidence:selected.matchScore,completeness,candidates:stored,resolutionTier:selected.providerId==='estimate'?'estimated':'structured',unresolvedReason:null,clarificationQuestion:selected.assumption??null});
+      await refreshEventStatus(String(row.event_id));
     }
   } else if (action === 'delete_event' && await ownedEvent(String(body.eventId))) {
     const ev = await env.DB.prepare('SELECT storage_key FROM evidence WHERE event_id = ?').bind(body.eventId).all<D1Row>();

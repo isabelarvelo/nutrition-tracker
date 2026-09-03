@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppState, EatingEvent, FoodItem, Goals, LibraryItem, MealTimes, Nutrients } from './types';
 import { emptyNutrients } from './types';
+import { withQuantity } from './lib/resolve/portion';
 
 type View = 'today' | 'review' | 'trends' | 'library';
 type FoodResearchResult = Nutrients & { id:string;name:string;brand:string;description:string;serving:string;servingGrams:number|null;servingsPerCookedCup:number|null;sourceLabel:string;sourceUrl:string };
@@ -29,7 +30,7 @@ function sumItems(items: FoodItem[]): Nutrients {
   }), { ...emptyNutrients });
 }
 function eventTotals(event: EatingEvent) { return sumItems(event.items); }
-function eventRevision(event:EatingEvent){return`${event.id}-${event.status}-${event.items.map((item)=>`${item.id}:${item.name}:${item.calories}:${item.source}`).join('|')}`;}
+function eventRevision(event:EatingEvent){return JSON.stringify(event);}
 function round(value: number) { return Math.round(value); }
 function statusLabel(status: EatingEvent['status']) { return status === 'needs_attention' ? 'Needs attention' : status[0].toUpperCase() + status.slice(1); }
 function libraryDraftFromFood(item:FoodItem):LibraryItem { const gramMatch=item.unit.match(/([\d.]+)\s*g\b/i);return{id:'',name:item.name,kind:'food',alias:item.name.toLowerCase(),quantity:item.quantity,unit:item.unit,calories:item.calories,protein:item.protein,carbs:item.carbs,fat:item.fat,fiber:item.fiber,iron:item.iron,calcium:item.calcium,vitaminC:item.vitaminC,servingGrams:gramMatch?Number(gramMatch[1]):null,servingsPerCookedCup:/\bpasta\b/i.test(item.name)?1:null,sourceLabel:item.source,sourceUrl:item.sourceUrl}; }
@@ -83,9 +84,9 @@ export default function MiseApp() {
     setSaving(true);
     try {
       const response = await fetch('/api/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (!response.ok) throw new Error();
+      if (!response.ok) { const failure=await response.json().catch(()=>({})) as {error?:string};throw new Error(failure.error||'That did not save. Please try again.'); }
       await load(); if (success) setToast(success);
-    } catch { setToast('That did not save. Please try again.'); }
+    } catch(error) { setToast(error instanceof Error?error.message:'That did not save. Please try again.'); }
     finally { setSaving(false); }
   }
 
@@ -102,7 +103,7 @@ export default function MiseApp() {
       setNote(''); setTranscript(''); setPhotos([]); setCaptureOpen(false);
       await load();
       if (reviewNow) { setView('review'); setExpanded(result.id); }
-      setToast(reviewNow ? 'Meal captured. Nutrition is resolving now.' : 'Meal captured. You can move on.');
+      setToast(reviewNow ? 'Meal saved. Review the foods and nutrition estimates.' : 'Meal saved. You can refine it anytime.');
     } catch (error) { setToast(error instanceof Error&&error.message?error.message:'Capture failed. Your draft is still here.'); }
     finally { setSaving(false); }
   }
@@ -180,7 +181,7 @@ export default function MiseApp() {
         <input ref={cameraRef} className="sr-only" type="file" accept="image/jpeg,image/png,image/webp,image/gif" capture="environment" onChange={(event) => {addPhotos(Array.from(event.target.files??[]));event.currentTarget.value='';}} />
         <input ref={uploadRef} className="sr-only" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple onChange={(event) => {addPhotos(Array.from(event.target.files??[]));event.currentTarget.value='';}} />
         <div className="capture-tools"><button onClick={() => cameraRef.current?.click()}>◉ <span>Take photo</span></button><button onClick={() => uploadRef.current?.click()}>▣ <span>Upload photos</span></button><button onClick={startVoice} className={`voice-tool ${listening ? 'recording' : ''}`}>● <span>{listening ? 'Listening…' : 'Describe by voice'}</span></button></div>
-        <div className="capture-actions"><button className="secondary" disabled={saving} onClick={() => capture(false)}>{saving ? 'Saving…' : 'Save quickly'}</button><button className="primary" disabled={saving} onClick={() => capture(true)}>Review estimate →</button></div>
+        <div className="capture-actions"><button className="secondary" disabled={saving} onClick={() => capture(false)}>{saving ? 'Processing…' : 'Save meal'}</button><button className="primary" disabled={saving} onClick={() => capture(true)}>{saving?'Estimating nutrition…':'Review estimate →'}</button></div>
         <p className="capture-footnote">Your evidence is saved before interpretation. Estimates stay clearly marked until you verify them.</p>
       </section></div>}
       {toast && <div className="toast" role="status">{toast}</div>}
@@ -211,6 +212,7 @@ function Macro({ label, value, goal }: { label:string; value:number; goal:number
 function EventCard({ event, library, open, onToggle, action, saving }: { event:EatingEvent;library:LibraryItem[];open:boolean;onToggle:()=>void;action:(body:Record<string,unknown>, success?:string)=>void;saving:boolean }) {
   const totals = eventTotals(event);
   const [items, setItems] = useState(event.items);
+  const [additionalFoods,setAdditionalFoods]=useState('');
   const [details, setDetails] = useState({ mealType:event.mealType, note:event.note, occurredAt:localDateTimeValue(event.occurredAt) });
   const time = new Date(event.occurredAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   function addFood() {
@@ -221,16 +223,38 @@ function EventCard({ event, library, open, onToggle, action, saving }: { event:E
     {open && <div className="event-detail">
       <div className="entry-editor"><div className="items-heading"><span className="detail-label">Entry details</span><span>Edit the date, meal, or description</span></div><div className="entry-fields"><label>Date and time<input type="datetime-local" value={details.occurredAt} onChange={(e)=>setDetails({...details,occurredAt:e.target.value})}/></label><label>Meal<select value={details.mealType} onChange={(e)=>setDetails({...details,mealType:e.target.value})}>{['Breakfast','Lunch','Dinner','Snack'].map((type)=><option key={type}>{type}</option>)}</select></label><label className="entry-note">Description<input value={details.note} onChange={(e)=>setDetails({...details,note:e.target.value})}/></label><button onClick={()=>action({action:'update_event',eventId:event.id,occurredAt:new Date(details.occurredAt).toISOString(),mealType:details.mealType,note:details.note},'Entry details updated.')}>Save details</button></div></div>
       {event.evidence.length > 0 && <div className="evidence-panel"><span className="detail-label">Original evidence</span><div className="evidence-row">{event.evidence.map((item) => item.type === 'photo' && item.url ? <a key={item.id} href={item.url} target="_blank"><img src={item.url} alt={item.filename ?? 'Meal evidence'} /></a> : <blockquote key={item.id}>{item.transcript}</blockquote>)}</div></div>}
-      <div className="items-panel"><div className="items-heading"><span className="detail-label">Foods in this entry</span><button className="add-item" onClick={addFood}>＋ Add food</button></div>{items.map((item, index) => {const libraryItem=library.find((saved)=>saved.id===item.libraryItemId||saved.name.toLowerCase()===item.name.toLowerCase());return <EditableItem key={item.id} item={item} libraryItem={libraryItem} onChange={(next) => setItems((all) => all.map((current, i) => i === index ? next : current))} onSave={(next) => action(next.id.startsWith('new-') ? { action:'add_item',eventId:event.id,item:next } : { action:'update_item',item:next },next.id.startsWith('new-')?'Food added.':'Item updated.')} onDelete={()=>item.id.startsWith('new-')?setItems((all)=>all.filter((current)=>current.id!==item.id)):action({action:'delete_item',itemId:item.id},'Food removed.')} onResolve={(candidate)=>action({action:'resolve_candidate',itemId:item.id,candidate},'Food matched and nutrition updated.')} onAddLibrary={()=>action({action:'save_library',item:libraryDraftFromFood(item)},'Added this food to your Library.')} onUpdateLibrary={()=>libraryItem&&action({action:'update_library_from_item',libraryItemId:libraryItem.id,item},'Library food updated from this entry.')} />})}</div>
-      <div className="confidence-note provenance-note"><span>i</span><p><strong>Source-first nutrition</strong><br />Each food shows where its values came from. Items without a reliable match stay flagged for review instead of receiving a generic estimate.</p></div>
+      <div className="items-panel"><div className="items-heading"><span className="detail-label">Foods & components</span><span>Tap any food name to edit</span></div>
+        <form className="add-foods-form" onSubmit={(e)=>{e.preventDefault();if(additionalFoods.trim()&&!saving)action({action:'add_foods',eventId:event.id,description:additionalFoods},'Foods added with nutrition estimates.');}}>
+          <label htmlFor={`add-foods-${event.id}`}>Missing something? Add foods to this meal</label>
+          <div><input id={`add-foods-${event.id}`} value={additionalFoods} onChange={e=>setAdditionalFoods(e.target.value)} placeholder="e.g. 1 tbsp cream cheese, 2 tomato slices" maxLength={2000} disabled={saving}/><button className="primary" disabled={saving||!additionalFoods.trim()||event.status==='captured'||event.status==='resolving'}>{saving?'Working…':'＋ Add & estimate'}</button></div>
+          <button className="manual-food-button" type="button" disabled={saving} onClick={addFood}>Or enter a food and nutrition manually</button>
+        </form>
+        {items.map((item, index) => {const libraryItem=library.find((saved)=>saved.id===item.libraryItemId||saved.name.toLowerCase()===item.name.toLowerCase());return <EditableItem key={item.id} item={item} saving={saving} libraryItem={libraryItem} onChange={(next) => setItems((all) => all.map((current, i) => i === index ? next : current))} onEstimate={()=>action({action:'estimate_item',itemId:item.id,name:item.name,quantity:item.quantity,unit:item.unit},'Nutrition re-estimated. Review the suggested matches.')} onSave={(next) => action(next.id.startsWith('new-') ? { action:'add_item',eventId:event.id,item:next } : { action:'update_item',item:next },next.id.startsWith('new-')?'Food added.':'Item updated.')} onDelete={()=>item.id.startsWith('new-')?setItems((all)=>all.filter((current)=>current.id!==item.id)):action({action:'delete_item',itemId:item.id},'Food removed.')} onResolve={(candidate)=>action({action:'resolve_candidate',itemId:item.id,candidate},'Food matched and nutrition updated.')} onAddLibrary={()=>action({action:'save_library',item:libraryDraftFromFood(item)},'Added this food to your Library.')} onUpdateLibrary={()=>libraryItem&&action({action:'update_library_from_item',libraryItemId:libraryItem.id,item},'Library food updated from this entry.')} />})}</div>
+      <div className="confidence-note provenance-note"><span>≈</span><p><strong>A useful estimate, yours to refine</strong><br />Database matches are preferred. AI estimates use typical portions and are clearly labeled; unavailable micronutrients stay unknown. Edit names or amounts, compare other matches, and verify when you’re happy.</p></div>
       <div className="event-actions"><button onClick={() => action({ action:'delete_event', eventId:event.id }, 'Meal deleted.')}>Delete</button><button onClick={() => action({ action:'save_event_to_library', eventId:event.id, name:event.note || `${event.mealType} meal` }, 'Saved for quick reuse.')}>Save to library</button><button onClick={() => action({ action:'repeat', eventId:event.id }, 'Meal repeated for today.')}>Repeat today</button>{event.status !== 'verified' && <button className="primary" disabled={saving} onClick={() => action({ action:'verify', eventId:event.id }, 'Meal marked verified.')}>Mark verified ✓</button>}</div>
     </div>}
   </article>;
 }
 
-function EditableItem({ item, libraryItem, onChange, onSave, onDelete, onResolve, onAddLibrary, onUpdateLibrary }: { item:FoodItem;libraryItem?:LibraryItem;onChange:(item:FoodItem)=>void;onSave:(item:FoodItem)=>void;onDelete:()=>void;onResolve:(candidate:NonNullable<FoodItem['candidates']>[number])=>void;onAddLibrary:()=>void;onUpdateLibrary:()=>void }) {
-  const unresolved=item.source.includes('Needs')||item.source.includes('needs')||item.source.includes('review');
-  return <div className="editable-item"><div className="provenance-row"><span className={`provenance-badge ${unresolved?'unresolved':item.source==='Personal Library'?'library':'researched'}`}>{item.source}</span>{item.sourceUrl&&<a href={item.sourceUrl} target="_blank" rel="noreferrer">View source ↗</a>}<span className={`library-state ${libraryItem?'saved':''}`}>{libraryItem?'✓ In Library':'Not in Library'}</span></div>{item.clarificationQuestion&&<p className="research-message">{item.clarificationQuestion}</p>}{item.candidates&&item.candidates.length>0&&<div className="candidate-list">{item.candidates.map((candidate)=><button key={`${candidate.providerId}-${candidate.externalId}`} onClick={()=>onResolve(candidate)}><strong>{candidate.name}</strong><span>{candidate.servingDescription} · {round(candidate.nutrients.calories)} kcal · {Math.round(candidate.matchScore*100)}% match</span></button>)}</div>}<input className="food-name" value={item.name} onChange={(e) => onChange({ ...item, name:e.target.value })} placeholder="Food name" /><div className="food-fields"><label>Amount<input type="number" step="0.1" value={item.quantity} onChange={(e) => onChange({ ...item, quantity:Number(e.target.value) })} /></label><label>Unit<input value={item.unit} onChange={(e) => onChange({ ...item, unit:e.target.value })} /></label>{nutrientKeys.map((key) => <label key={key}>{key === 'calories' ? 'kcal' : key}<input type="number" step="0.1" value={item[key]} onChange={(e) => onChange({ ...item, [key]:Number(e.target.value) })} /></label>)}</div><div className="item-meta"><span>{unresolved?'Nutrition not found—review values':`${Math.round(item.completeness*8)} of 8 tracked nutrients available`}</span><button className="library-item-action" disabled={item.id.startsWith('new-')} onClick={libraryItem?onUpdateLibrary:onAddLibrary}>{libraryItem?'Update Library':'Add to Library'}</button><button className="delete-item" onClick={onDelete}>Remove</button><button onClick={() => onSave(item)}>{item.id.startsWith('new-')?'Add food':'Save changes'}</button></div></div>;
+function EditableItem({ item, libraryItem, saving, onChange, onSave, onDelete, onResolve, onEstimate, onAddLibrary, onUpdateLibrary }: { item:FoodItem;libraryItem?:LibraryItem;saving:boolean;onChange:(item:FoodItem)=>void;onSave:(item:FoodItem)=>void;onDelete:()=>void;onResolve:(candidate:NonNullable<FoodItem['candidates']>[number])=>void;onEstimate:()=>void;onAddLibrary:()=>void;onUpdateLibrary:()=>void }) {
+  const [quantityDraft,setQuantityDraft]=useState(String(item.quantity));
+  const unresolved=item.resolutionTier==='unresolved'||item.source.toLowerCase().includes('needs');
+  const isNew=item.id.startsWith('new-');
+  const valid=Boolean(item.name.trim()&&item.unit.trim()&&item.quantity>0&&nutrientKeys.every(key=>Number.isFinite(item[key])&&item[key]>=0));
+  function changeQuantity(quantity:number){
+    onChange(withQuantity(item,quantity));
+  }
+  return <fieldset className="editable-item" disabled={saving}>
+    <legend className="sr-only">Edit {item.name||'new food'}</legend>
+    <div className="provenance-row"><span className={`provenance-badge ${unresolved||item.resolutionTier==='estimated'?'unresolved':item.source==='Personal Library'?'library':'researched'}`}>{item.source}</span>{item.sourceUrl&&<a href={item.sourceUrl} target="_blank" rel="noreferrer">View source ↗</a>}<span className={`library-state ${libraryItem?'saved':''}`}>{libraryItem?'✓ In Library':'Not in Library'}</span></div>
+    <label className="food-name-label">Food name <span>Editable</span><input className="food-name" value={item.name} onChange={(e)=>onChange({...item,name:e.target.value})} placeholder="Name this food" maxLength={200} autoFocus={isNew}/></label>
+    {item.clarificationQuestion&&<p className="research-message">{item.clarificationQuestion}</p>}
+    {unresolved&&<p className="research-message">No estimate available yet. Use “Re-estimate nutrition” to try again, or enter values yourself.</p>}
+    <div className="food-fields"><label>Amount<input type="number" min="0.01" step="any" value={quantityDraft} onChange={e=>setQuantityDraft(e.target.value)} onBlur={()=>{const quantity=Number(quantityDraft);if(quantity>0&&quantity<=20000)changeQuantity(quantity);else setQuantityDraft(String(item.quantity));}}/></label><label>Unit<input value={item.unit} maxLength={80} onChange={e=>onChange({...item,unit:e.target.value})}/></label>{nutrientKeys.map(key=><label key={key}>{key==='calories'?'kcal':`${key} (g)`}<input type="number" min="0" step="any" value={item[key]} onChange={e=>onChange({...item,[key]:Number(e.target.value)})}/></label>)}</div>
+    <p className="portion-help">Values are for the full amount above. Changing the amount scales nutrition; after changing the name or unit, re-estimate or edit the values.</p>
+    {item.candidates&&item.candidates.length>0&&<details className="match-options" open={item.resolutionTier==='estimated'||unresolved}><summary>Compare {item.candidates.length} possible {item.candidates.length===1?'match':'matches'}</summary><div className="candidate-list">{item.candidates.map(candidate=>{const selected=candidate.name===item.name&&Math.abs(candidate.nutrients.calories-item.calories)<.1&&candidate.sourceLabel===item.source;return <button key={`${candidate.providerId}-${candidate.externalId}`} aria-pressed={selected} onClick={()=>onResolve(candidate)}><div><strong>{selected?'✓ Current: ':''}{candidate.name}</strong><small>{candidate.sourceLabel}{candidate.assumption?` · ${candidate.assumption}`:''}</small></div><span>{candidate.servingDescription} · {round(candidate.nutrients.calories)} kcal<br/>{selected?'Selected':'Use this match'}</span></button>;})}</div></details>}
+    <div className="item-meta"><span>{unresolved?'Nutrition incomplete':`${Math.round(item.completeness*8)} of 8 tracked nutrients available`}</span>{!isNew&&<button disabled={!valid} onClick={onEstimate}>{saving?'Estimating…':'Re-estimate nutrition'}</button>}<button className="library-item-action" disabled={isNew||!valid} onClick={libraryItem?onUpdateLibrary:onAddLibrary}>{libraryItem?'Update Library':'Add to Library'}</button><button className="delete-item" onClick={onDelete}>Remove</button><button disabled={!valid} onClick={()=>onSave(item)}>{isNew?'Add food':'Save changes'}</button></div>
+  </fieldset>;
 }
 
 function ReviewView({ events, library, expanded, setExpanded, action, saving }: { events:EatingEvent[];library:LibraryItem[];expanded:string|null;setExpanded:(id:string|null)=>void;action:(body:Record<string,unknown>,success?:string)=>void;saving:boolean }) {
