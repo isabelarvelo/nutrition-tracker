@@ -5,15 +5,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppState, EatingEvent, FoodItem, Goals, LibraryItem, MealTimes, Nutrients } from './types';
 import { emptyNutrients } from './types';
 import { withQuantity } from './lib/resolve/portion';
+import { localDateFor } from './lib/dates';
 
 type View = 'today' | 'review' | 'trends' | 'library';
 type FoodResearchResult = Nutrients & { id:string;name:string;brand:string;description:string;serving:string;servingGrams:number|null;servingsPerCookedCup:number|null;sourceLabel:string;sourceUrl:string };
 const initial: AppState = { events: [], library: [], goals: { calories: 2100, protein: 115, carbs: 240, fat: 70, fiber: 28 }, mealTimes:{ Breakfast:'08:00', Lunch:'12:30', Dinner:'18:30', Snack:'15:30' }, user: { displayName: 'Food journal', email: '' } };
 const nutrientKeys: Array<keyof Pick<Nutrients, 'calories'|'protein'|'carbs'|'fat'|'fiber'>> = ['calories','protein','carbs','fat','fiber'];
 
-function dayKey(value: string) { return new Date(value).toLocaleDateString('en-CA'); }
-function eventDayKey(event: EatingEvent) { return event.localDate ?? dayKey(event.occurredAt); }
-function todayKey() { return new Date().toLocaleDateString('en-CA'); }
+function browserTimeZone() { return Intl.DateTimeFormat().resolvedOptions().timeZone; }
+function eventDayKey(event: EatingEvent, timezone: string) { return event.localDate ?? localDateFor(event.occurredAt, timezone); }
+function todayKey(timezone: string) { return localDateFor(new Date(), timezone); }
 function localDateTimeValue(value: string | Date) {
   const date = typeof value === 'string' ? new Date(value) : value;
   const pad = (part: number) => String(part).padStart(2, '0');
@@ -47,7 +48,7 @@ export default function MiseApp() {
   const [photos, setPhotos] = useState<File[]>([]);
   const [mealType, setMealType] = useState('Breakfast');
   const [captureDate, setCaptureDate] = useState(() => localDateTimeValue(new Date()));
-  const [selectedDay, setSelectedDay] = useState(todayKey());
+  const [selectedDay, setSelectedDay] = useState('');
   const [expanded, setExpanded] = useState<string | null>(null);
   const [toast, setToast] = useState('');
   const [listening, setListening] = useState(false);
@@ -58,9 +59,12 @@ export default function MiseApp() {
     try {
       const response = await fetch('/api/state', { cache: 'no-store' });
       if (!response.ok) throw new Error('Could not load journal');
-      setState(await response.json());
+      const next = await response.json() as AppState;
+      setState(next);
+      setSelectedDay((current) => current || todayKey(next.timezone ?? browserTimeZone()));
     } catch { setToast('Could not load your journal. Please refresh.'); }
-    finally { setLoading(false); }
+    // A failed first load must still leave the journal sitting on a real day.
+    finally { setSelectedDay((current) => current || todayKey(browserTimeZone())); setLoading(false); }
   }, []);
   // The initial server-backed journal load intentionally hydrates client state.
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -72,7 +76,8 @@ export default function MiseApp() {
   }, [load, state.events]);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 3200); return () => clearTimeout(timer); }, [toast]);
 
-  const selectedEvents = useMemo(() => state.events.filter((event) => eventDayKey(event) === selectedDay), [state.events, selectedDay]);
+  const timezone = state.timezone ?? browserTimeZone();
+  const selectedEvents = useMemo(() => state.events.filter((event) => eventDayKey(event, timezone) === selectedDay), [state.events, selectedDay, timezone]);
   const selectedTotals = useMemo(() => sumItems(selectedEvents.flatMap((event) => event.items)), [selectedEvents]);
   const reviewEvents = state.events.filter((event) => event.status !== 'verified').sort((left,right) => {
     const impact = (event:EatingEvent) => event.items.reduce((sum,item) => sum + (1-item.confidence)*item.calories, 0);
@@ -87,7 +92,7 @@ export default function MiseApp() {
       const response = await fetch('/api/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       if (!response.ok) { const failure=await response.json().catch(()=>({})) as {error?:string};throw new Error(failure.error||'That did not save. Please try again.'); }
       const result=await response.json() as {id?:string};
-      await load(); if(body.action==='log_library'&&result.id){setView('today');setSelectedDay(todayKey());setExpanded(result.id);} if (success) setToast(success);
+      await load(); if(body.action==='log_library'&&result.id){setView('today');setSelectedDay(todayKey(timezone));setExpanded(result.id);} if (success) setToast(success);
     } catch(error) { setToast(error instanceof Error?error.message:'That did not save. Please try again.'); }
     finally { setSaving(false); }
   }
@@ -140,7 +145,7 @@ export default function MiseApp() {
 
   function exportData() {
     const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), ...state }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `mise-export-${todayKey()}.json`; link.click(); URL.revokeObjectURL(url);
+    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `mise-export-${todayKey(timezone)}.json`; link.click(); URL.revokeObjectURL(url);
   }
 
   if (loading) return <div className="loading"><div className="brand-mark">M</div><p>Setting the table…</p></div>;
@@ -160,9 +165,9 @@ export default function MiseApp() {
         </nav>
 
         <section className="main-content">
-          {view === 'today' && <TodayView events={selectedEvents} library={state.library} totals={selectedTotals} goals={state.goals} coverage={coverage} selectedDay={selectedDay} setSelectedDay={setSelectedDay} expanded={expanded} setExpanded={setExpanded} action={action} onCapture={() => openCapture()} saving={saving} />}
+          {view === 'today' && <TodayView timezone={timezone} events={selectedEvents} library={state.library} totals={selectedTotals} goals={state.goals} coverage={coverage} selectedDay={selectedDay} setSelectedDay={setSelectedDay} expanded={expanded} setExpanded={setExpanded} action={action} onCapture={() => openCapture()} saving={saving} />}
           {view === 'review' && <ReviewView events={reviewEvents} library={state.library} expanded={expanded} setExpanded={setExpanded} action={action} saving={saving} />}
-          {view === 'trends' && <TrendsView events={state.events} goals={state.goals} mealTimes={state.mealTimes} onSave={(goals,mealTimes) => action({ action: 'save_goals', goals, mealTimes }, 'Profile updated.')} onDeleteAll={() => { if (window.confirm('Permanently delete every meal, photo, saved food, and goal? This cannot be undone.')) action({ action:'delete_all' }, 'All food-tracking data was deleted.'); }} />}
+          {view === 'trends' && <TrendsView timezone={timezone} events={state.events} goals={state.goals} mealTimes={state.mealTimes} onSave={(goals,mealTimes) => action({ action: 'save_goals', goals, mealTimes }, 'Profile updated.')} onDeleteAll={() => { if (window.confirm('Permanently delete every meal, photo, saved food, and goal? This cannot be undone.')) action({ action:'delete_all' }, 'All food-tracking data was deleted.'); }} />}
           {view === 'library' && <LibraryView onLog={(itemId)=>action({action:'log_library',itemId,occurredAt:new Date().toISOString(),mealType:'Breakfast'},'Meal added with editable ingredients.')} items={state.library} onSave={(item) => action({ action: 'save_library', item }, 'Added to your library.')} onDelete={(itemId)=>action({action:'delete_library',itemId},'Removed from your library.')} saving={saving} />}
         </section>
       </div>
@@ -192,14 +197,14 @@ export default function MiseApp() {
   );
 }
 
-function TodayView({ events, library, totals, goals, coverage, selectedDay, setSelectedDay, expanded, setExpanded, action, onCapture, saving }: { events: EatingEvent[]; library:LibraryItem[]; totals: Nutrients; goals: Goals; coverage: number; selectedDay:string; setSelectedDay:(day:string)=>void; expanded: string|null; setExpanded: (id:string|null)=>void; action:(body:Record<string,unknown>, success?:string)=>void; onCapture:()=>void; saving:boolean }) {
+function TodayView({ timezone, events, library, totals, goals, coverage, selectedDay, setSelectedDay, expanded, setExpanded, action, onCapture, saving }: { timezone: string; events: EatingEvent[]; library:LibraryItem[]; totals: Nutrients; goals: Goals; coverage: number; selectedDay:string; setSelectedDay:(day:string)=>void; expanded: string|null; setExpanded: (id:string|null)=>void; action:(body:Record<string,unknown>, success?:string)=>void; onCapture:()=>void; saving:boolean }) {
   const progress = Math.min(100, Math.round((totals.calories / goals.calories) * 100));
   const selectedDate = new Date(`${selectedDay}T12:00:00`);
-  const isToday = selectedDay === todayKey();
-  function moveDay(offset:number) { const next = new Date(selectedDate); next.setDate(next.getDate()+offset); setSelectedDay(next.toLocaleDateString('en-CA')); }
+  const isToday = selectedDay === todayKey(timezone);
+  function moveDay(offset:number) { const next = new Date(selectedDate); next.setDate(next.getDate()+offset); setSelectedDay(localDateFor(next, timezone)); }
   return <>
     <div className="page-heading"><div><span className="eyebrow">Journal</span><h1>{isToday ? 'How today is taking shape' : selectedDate.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'})}</h1><p>{isToday ? 'Useful direction, without demanding a perfect log.' : 'Review and refine anything you logged on this day.'}</p></div><button className="primary header-capture" onClick={onCapture}>＋ Add to this day</button></div>
-    <div className="date-navigator"><button onClick={()=>moveDay(-1)} aria-label="Previous day">‹</button><label><span>Journal date</span><input type="date" value={selectedDay} onChange={(event)=>setSelectedDay(event.target.value)} /></label><button onClick={()=>moveDay(1)} aria-label="Next day">›</button>{!isToday&&<button className="today-jump" onClick={()=>setSelectedDay(todayKey())}>Back to today</button>}</div>
+    <div className="date-navigator"><button onClick={()=>moveDay(-1)} aria-label="Previous day">‹</button><label><span>Journal date</span><input type="date" value={selectedDay} onChange={(event)=>setSelectedDay(event.target.value)} /></label><button onClick={()=>moveDay(1)} aria-label="Next day">›</button>{!isToday&&<button className="today-jump" onClick={()=>setSelectedDay(todayKey(timezone))}>Back to today</button>}</div>
     <section className="today-overview">
       <div className="energy-card"><div className="energy-copy"><span>Energy</span><strong>{round(totals.calories).toLocaleString()}</strong><small>of {goals.calories.toLocaleString()} kcal</small></div><div className="energy-ring" style={{ '--progress': `${progress * 3.6}deg` } as React.CSSProperties}><div><b>{progress}%</b><span>today</span></div></div></div>
       <div className="macro-grid">{(['protein','carbs','fat','fiber'] as const).map((key) => <Macro key={key} label={key} value={totals[key]} goal={goals[key]} />)}</div>
@@ -280,10 +285,10 @@ function ReviewView({ events, library, expanded, setExpanded, action, saving }: 
   return <><div className="page-heading"><div><span className="eyebrow">Review inbox</span><h1>Resolve what matters</h1><p>Only uncertain meals wait here. Estimates can stay estimates as long as you like.</p></div></div>{events.length ? <div className="review-banner"><span>≈</span><div><strong>{events.length} {events.length === 1 ? 'entry needs' : 'entries need'} a look</strong><p>Recent entries and foods without a reliable source appear here.</p></div></div> : <div className="all-clear"><span>✓</span><h2>You’re all caught up</h2><p>No captured or estimated meals need attention.</p></div>}<div className="event-list">{events.map((event) => <EventCard key={event.id} event={event} library={library} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div></>;
 }
 
-function TrendsView({ events, goals, mealTimes, onSave, onDeleteAll }: { events:EatingEvent[]; goals:Goals; mealTimes:MealTimes; onSave:(goals:Goals,mealTimes:MealTimes)=>void; onDeleteAll:()=>void }) {
+function TrendsView({ timezone, events, goals, mealTimes, onSave, onDeleteAll }: { timezone:string; events:EatingEvent[]; goals:Goals; mealTimes:MealTimes; onSave:(goals:Goals,mealTimes:MealTimes)=>void; onDeleteAll:()=>void }) {
   const [draft, setDraft] = useState(goals);
   const [timeDraft,setTimeDraft]=useState(mealTimes);
-  const days = Array.from({ length:7 }, (_, index) => { const date = new Date(); date.setDate(date.getDate() - (6-index)); const key = date.toLocaleDateString('en-CA'); const dayEvents = events.filter((event) => eventDayKey(event) === key); return { label:date.toLocaleDateString('en-US',{weekday:'short'}).slice(0,1), totals:sumItems(dayEvents.flatMap((event)=>event.items)), events:dayEvents }; });
+  const days = Array.from({ length:7 }, (_, index) => { const date = new Date(); date.setDate(date.getDate() - (6-index)); const key = localDateFor(date, timezone); const dayEvents = events.filter((event) => eventDayKey(event, timezone) === key); return { label:date.toLocaleDateString('en-US',{weekday:'short'}).slice(0,1), totals:sumItems(dayEvents.flatMap((event)=>event.items)), events:dayEvents }; });
   const avg = sumItems(days.flatMap((day) => day.events.flatMap((event) => event.items))); nutrientKeys.forEach((key) => { avg[key] /= 7; });
   const verified = events.filter((event) => event.status === 'verified').length; const completeness = events.length ? Math.round(events.flatMap((e)=>e.items).reduce((s,i)=>s+i.completeness,0)/Math.max(1,events.flatMap((e)=>e.items).length)*100) : 0;
   return <><div className="page-heading"><div><span className="eyebrow">Profile & last 7 days</span><h1>Your patterns and defaults</h1><p>Set your goals and usual meal times, then see how the week is taking shape.</p></div></div><section className="goals-card profile-card"><div><span className="eyebrow">Your profile</span><h2>Goals & meal rhythm</h2><p>Choosing a meal during capture will start at its usual time. You can still adjust it for any entry.</p></div><div className="profile-fields"><div className="goal-fields">{nutrientKeys.map((key)=><label key={key}>{key}<span><input type="number" value={draft[key]} onChange={(e)=>setDraft({...draft,[key]:Number(e.target.value)})}/>{key==='calories'?'kcal':'g'}</span></label>)}</div><div className="meal-defaults"><strong>Usual meal times</strong><div className="meal-time-grid">{(Object.keys(timeDraft) as Array<keyof MealTimes>).map((type)=><label key={type}>{type}<input type="time" value={timeDraft[type]} onChange={(event)=>setTimeDraft({...timeDraft,[type]:event.target.value})}/></label>)}</div></div><button className="primary profile-save" onClick={()=>onSave(draft,timeDraft)}>Save profile</button></div></section><div className="trend-grid"><section className="chart-card"><div className="chart-head"><div><span>Daily energy</span><strong>{round(avg.calories).toLocaleString()} <small>kcal avg</small></strong></div><span className="soft-pill">7 days</span></div><div className="bar-chart">{days.map((day,index) => <div key={index} className="bar-column"><div className="bar-track"><i style={{ height:`${Math.min(100,(day.totals.calories/goals.calories)*100)}%` }} /></div><span>{day.label}</span></div>)}</div><div className="goal-line"><i />Goal: {goals.calories.toLocaleString()} kcal</div></section><section className="quality-card"><span className="detail-label">Data quality</span><Quality value={events.length ? Math.round((verified/events.length)*100) : 0} label="Events verified" color="#2e7451" /><Quality value={completeness} label="Nutrient coverage" color="#e4a943" /><p>Coverage reflects whether nutrient values are known—not whether your intake is “good.”</p></section></div><section className="averages-card"><div className="section-title"><div><h2>Daily averages</h2><span>Across the last week</span></div></div><div className="average-grid">{(['protein','carbs','fat','fiber'] as const).map((key)=><div key={key}><span>{key}</span><strong>{round(avg[key])}g</strong><small>{Math.round((avg[key]/goals[key])*100)}% of target</small></div>)}</div></section><section className="data-card"><div><span className="eyebrow">Data control</span><h2>Your journal belongs to you</h2><p>Use the download button in the header for a complete JSON export. Original photos remain available from each meal.</p></div><button onClick={onDeleteAll}>Delete all my data</button></section></>;
