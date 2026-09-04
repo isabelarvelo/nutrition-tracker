@@ -7,6 +7,7 @@ import { actionSchema, capturePayloadSchema, validationError } from '../../lib/s
 import { findLibraryMatch, parseAmount } from '../../lib/resolve/amount';
 import { parseMealBundle, type MealImageInput } from '../../lib/resolve/parse';
 import { libraryComponents, mealTitle } from '../../lib/resolve/groups';
+import { enrichReceiptItem } from '../../lib/resolve/receipt-nutrition';
 import { researchFoodWeb } from '../../lib/resolve/web-food';
 import { estimateFoods, applyEstimate, isComponentMatch } from '../../lib/resolve/estimate';
 
@@ -409,10 +410,20 @@ export async function POST(request: Request) {
     }
     await env.DB.prepare('UPDATE library_items SET name=?,kind=?,alias=?,quantity=?,unit=?,calories=?,protein=?,carbs=?,fat=?,fiber=?,iron=?,calcium=?,vitamin_c=?,serving_grams=?,servings_per_cooked_cup=?,source_label=?,source_url=?,nutrition_pending=?,components=? WHERE id=? AND user_id=?').bind(item.name,item.kind,item.alias,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,item.servingGrams,item.servingsPerCookedCup,item.nutritionPending?'Receipt · nutrition pending':item.sourceLabel,item.sourceUrl,item.nutritionPending?1:0,item.components?.length?JSON.stringify(item.components):null,item.id,user.userId).run();
   } else if (action === 'save_library') {
-    const item = body.item as LibraryItem; const now = new Date().toISOString();
+    let item = body.item as LibraryItem; const now = new Date().toISOString();
     if(item.nutritionPending){
-      const existing=await env.DB.prepare('SELECT id FROM library_items WHERE user_id=? AND lower(trim(name))=lower(trim(?))').bind(user.userId,item.name).first();
-      if(existing)return Response.json({ok:true});
+      const existing=await env.DB.prepare('SELECT name,alias FROM library_items WHERE user_id=?').bind(user.userId).all<{name:string;alias:string}>();
+      const key=item.name.trim().toLowerCase();
+      if(existing.results.some(saved=>[saved.name,...saved.alias.split(',')].some(name=>name.trim().toLowerCase()===key)))return Response.json({ok:true});
+      item=await enrichReceiptItem(item,async query=>{
+        const providers=await Promise.allSettled([
+          env.USDA_API_KEY?.trim()?researchFoods(query,env.USDA_API_KEY.trim(),false,6).then(result=>result.results):Promise.resolve([]),
+          researchOpenFoodFacts(query,6),
+        ]);
+        const candidates=providers.flatMap(result=>result.status==='fulfilled'?result.value:[]);
+        if(!env.OPENAI_API_KEY?.trim())return {results:[]};
+        return researchFoodWeb(query,candidates,{savedFoods:[]},{apiKey:env.OPENAI_API_KEY.trim(),model:env.OPENAI_MODEL?.trim(),automaticReceipt:true});
+      });
     }
     await env.DB.prepare(`INSERT INTO library_items (id,user_id,name,kind,alias,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,serving_grams,servings_per_cooked_cup,source_label,source_url,created_at,nutrition_pending) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.userId,item.name,item.kind,item.alias,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,item.servingGrams ?? null,item.servingsPerCookedCup ?? null,item.sourceLabel ?? '',item.sourceUrl ?? '',now,item.nutritionPending?1:0).run();
   } else if (action === 'delete_library') {
