@@ -52,6 +52,7 @@ export const libraryItemSchema = nutrientsSchema.extend({
   components: z.array(foodItemSchema).max(30).optional(),
   id: z.string().max(100),
   name: z.string().trim().min(1).max(200),
+  lookupQuery: z.string().trim().max(160).optional(),
   kind: z.enum(['food', 'recipe', 'meal']),
   alias: z.string().trim().max(1_000),
   quantity: z.number().finite().positive().max(20_000),

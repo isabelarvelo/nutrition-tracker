@@ -21,10 +21,25 @@ export type FoodItem = Nutrients & {
   completeness: number;
   candidates?: NutritionCandidate[];
   resolutionTier?: 'library' | 'structured' | 'web' | 'estimated' | 'unresolved' | null;
-  unresolvedReason?: 'no_match' | 'unit_mismatch' | 'ambiguous_serving' | null;
+  unresolvedReason?: UnresolvedReason;
   clarificationQuestion?: string | null;
   quotedSourceText?: string | null;
 };
+
+/**
+ * Why an automatic nutrition lookup declined to apply a result. Every path
+ * that leaves nutrition blank now records one, so "nutrition pending" is
+ * always accompanied by something the person can act on.
+ */
+export type UnresolvedReason =
+  | 'no_match'
+  | 'low_confidence'
+  | 'ambiguous_match'
+  | 'ambiguous_serving'
+  | 'incomplete_source'
+  | 'unit_mismatch'
+  | 'lookup_failed'
+  | null;
 
 export type NutritionCandidate = {
   providerId: 'library' | 'usda' | 'off' | 'web' | 'estimate';
@@ -78,6 +93,10 @@ export type LibraryItem = Nutrients & {
   servingsPerCookedCup: number | null;
   sourceLabel: string;
   sourceUrl: string;
+  candidates?: NutritionCandidate[];
+  unresolvedReason?: UnresolvedReason;
+  /** Transient receipt context used when first researching a library food. */
+  lookupQuery?: string;
 };
 
 export type Goals = {

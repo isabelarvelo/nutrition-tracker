@@ -6,5 +6,6 @@ declare namespace Cloudflare {
     OPENAI_API_KEY?: string;
     OPENAI_MODEL?: string;
     OPENAI_VISION_MODEL?: string;
+    OPENAI_TRANSCRIBE_MODEL?: string;
   }
 }

@@ -5,16 +5,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppState, EatingEvent, FoodItem, Goals, LibraryItem, MealTimes, Nutrients } from './types';
 import { emptyNutrients } from './types';
 import { withQuantity } from './lib/resolve/portion';
-import { localDateFor } from './lib/dates';
+import { eventDayKey, localDateFor, todayKey } from './lib/dates';
 
 type View = 'today' | 'review' | 'trends' | 'library';
 import type { FoodResearchResult } from './food-research';
+import { useVoiceNote } from './lib/useVoiceNote';
+import CameraSheet from './components/CameraSheet';
+import type { ReceiptFood } from './lib/resolve/receipt';
+import { buildLookupQuery } from './lib/resolve/receipt-query';
+import MonthCalendar from './components/MonthCalendar';
 const initial: AppState = { events: [], library: [], goals: { calories: 2100, protein: 115, carbs: 240, fat: 70, fiber: 28 }, mealTimes:{ Breakfast:'08:00', Lunch:'12:30', Dinner:'18:30', Snack:'15:30' }, user: { displayName: 'Food journal', email: '' } };
 const nutrientKeys: Array<keyof Pick<Nutrients, 'calories'|'protein'|'carbs'|'fat'|'fiber'>> = ['calories','protein','carbs','fat','fiber'];
 
 function browserTimeZone() { return Intl.DateTimeFormat().resolvedOptions().timeZone; }
-function eventDayKey(event: EatingEvent, timezone: string) { return event.localDate ?? localDateFor(event.occurredAt, timezone); }
-function todayKey(timezone: string) { return localDateFor(new Date(), timezone); }
 function localDateTimeValue(value: string | Date) {
   const date = typeof value === 'string' ? new Date(value) : value;
   const pad = (part: number) => String(part).padStart(2, '0');
@@ -51,9 +54,20 @@ export default function MiseApp() {
   const [selectedDay, setSelectedDay] = useState('');
   const [expanded, setExpanded] = useState<string | null>(null);
   const [toast, setToast] = useState('');
-  const [listening, setListening] = useState(false);
-  const cameraRef = useRef<HTMLInputElement>(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const closeCamera = useCallback(() => setCameraOpen(false), []);
   const uploadRef = useRef<HTMLInputElement>(null);
+  const voice = useVoiceNote(
+    useCallback((text: string) => setTranscript((current) => (current ? `${current} ${text}` : text)), []),
+    useCallback((message: string) => setToast(message), []),
+  );
+
+  function closeCapture() {
+    if (saving) return;
+    voice.cancel();
+    setCameraOpen(false);
+    setCaptureOpen(false);
+  }
 
   const load = useCallback(async () => {
     try {
@@ -98,7 +112,9 @@ export default function MiseApp() {
   }
 
   async function capture(reviewNow: boolean) {
-    if (!note.trim() && !transcript.trim() && !photos.length) { setToast('Add a note, voice description, or photo first.'); return; }
+    if (voice.status !== 'idle') { setToast('Finish the voice note first.'); return; }
+    if (!note.trim() && !transcript.trim() && !photos.length) { setToast('Add a note, voice note, or photo first.'); return; }
+    if (!captureDate || !Number.isFinite(new Date(captureDate).getTime())) { setToast('Choose a valid meal date and time.'); return; }
     setSaving(true);
     const form = new FormData();
     form.set('payload', JSON.stringify({ title:captureTitle, note, transcript, mealType, occurredAt: new Date(captureDate).toISOString(), idempotencyKey: crypto.randomUUID() }));
@@ -113,14 +129,6 @@ export default function MiseApp() {
       setToast(reviewNow ? 'Meal saved. Review the foods and nutrition estimates.' : 'Meal saved. You can refine it anytime.');
     } catch (error) { setToast(error instanceof Error&&error.message?error.message:'Capture failed. Your draft is still here.'); }
     finally { setSaving(false); }
-  }
-
-  function startVoice() {
-    const SpeechRecognition = (window as unknown as { webkitSpeechRecognition?: new () => { continuous: boolean; interimResults: boolean; lang: string; onresult: (event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void; onend: () => void; start: () => void } }).webkitSpeechRecognition;
-    if (!SpeechRecognition) { setToast('Voice transcription is not supported in this browser. You can type instead.'); return; }
-    const recognition = new SpeechRecognition(); recognition.continuous = false; recognition.interimResults = false; recognition.lang = 'en-US';
-    recognition.onresult = (event) => setTranscript(Array.from(event.results).map((result) => result[0].transcript).join(' '));
-    recognition.onend = () => setListening(false); setListening(true); recognition.start();
   }
 
   function addPhotos(selected:File[]) {
@@ -167,7 +175,7 @@ export default function MiseApp() {
         <section className="main-content">
           {view === 'today' && <TodayView timezone={timezone} events={selectedEvents} library={state.library} totals={selectedTotals} goals={state.goals} coverage={coverage} selectedDay={selectedDay} setSelectedDay={setSelectedDay} expanded={expanded} setExpanded={setExpanded} action={action} onCapture={() => openCapture()} saving={saving} />}
           {view === 'review' && <ReviewView events={reviewEvents} library={state.library} expanded={expanded} setExpanded={setExpanded} action={action} saving={saving} />}
-          {view === 'trends' && <TrendsView timezone={timezone} events={state.events} goals={state.goals} mealTimes={state.mealTimes} onSave={(goals,mealTimes) => action({ action: 'save_goals', goals, mealTimes }, 'Profile updated.')} onDeleteAll={() => { if (window.confirm('Permanently delete every meal, photo, saved food, and goal? This cannot be undone.')) action({ action:'delete_all' }, 'All food-tracking data was deleted.'); }} />}
+          {view === 'trends' && <TrendsView timezone={timezone} events={state.events} goals={state.goals} mealTimes={state.mealTimes} selectedDay={selectedDay} onSelectDay={(day)=>{setSelectedDay(day);setView('today');}} onSave={(goals,mealTimes) => action({ action: 'save_goals', goals, mealTimes }, 'Profile updated.')} onDeleteAll={() => { if (window.confirm('Permanently delete every meal, photo, saved food, and goal? This cannot be undone.')) action({ action:'delete_all' }, 'All food-tracking data was deleted.'); }} />}
           {view === 'library' && <LibraryView onLog={(itemId)=>action({action:'log_library',itemId,occurredAt:new Date().toISOString(),mealType:'Breakfast'},'Meal added with editable ingredients.')} items={state.library} onSave={(item) => action({ action: item.id ? 'update_library' : 'save_library', item }, item.id ? 'Library entry updated.' : 'Added to your library.')} onDelete={(itemId)=>action({action:'delete_library',itemId},'Removed from your library.')} saving={saving} />}
         </section>
       </div>
@@ -177,21 +185,30 @@ export default function MiseApp() {
       </nav>
       <button className="mobile-capture" onClick={() => openCapture()} aria-label="Capture a meal">＋</button>
 
-      {captureOpen && <div className="modal-backdrop" onMouseDown={() => !saving && setCaptureOpen(false)}><section className="capture-sheet" onMouseDown={(event) => event.stopPropagation()} aria-modal="true" role="dialog" aria-labelledby="capture-title">
-        <div className="sheet-handle" /><div className="capture-head"><div><span className="eyebrow">Quick capture</span><h2 id="capture-title">What did you have?</h2></div><button className="close-button" onClick={() => setCaptureOpen(false)}>×</button></div>
+      {captureOpen && <div className="modal-backdrop" onMouseDown={closeCapture}><section className="capture-sheet" onMouseDown={(event) => event.stopPropagation()} aria-modal="true" role="dialog" aria-labelledby="capture-title">
+        <div className="sheet-handle" /><div className="capture-head"><div><span className="eyebrow">Quick capture</span><h2 id="capture-title">What did you have?</h2></div><button className="close-button" disabled={saving} aria-label="Close capture" onClick={closeCapture}>×</button></div>
         <div className="meal-types">{(['Breakfast','Lunch','Dinner','Snack'] as Array<keyof MealTimes>).map((type) => <button key={type} onClick={() => selectMealType(type)} className={mealType === type ? 'selected' : ''}>{type}</button>)}</div>
         <label className="capture-date">Meal title (optional)<input value={captureTitle} maxLength={200} onChange={e=>setCaptureTitle(e.target.value)} placeholder="Mise will suggest a title if left blank"/></label>
         <label className="capture-date">Date and time<input type="datetime-local" value={captureDate} onChange={(event) => setCaptureDate(event.target.value)} /></label>
         <textarea className="capture-input" value={note} onChange={(event) => setNote(event.target.value)} placeholder='Try “1 cup pasta, 2 eggs, parmesan, and 1 cup cold brew”' autoFocus />
         <p className="capture-hint">Separate foods with commas or “and” and Mise will create an item for each one.</p>
         {transcript && <div className="transcript"><span>Voice note</span><textarea value={transcript} onChange={(event) => setTranscript(event.target.value)} /></div>}
-        {photos.length > 0 && <div className="photo-strip">{photos.map((photo, index) => <div key={`${photo.name}-${index}`}><img src={URL.createObjectURL(photo)} alt={`Meal evidence ${index + 1}`} /><button onClick={() => setPhotos((all) => all.filter((_, i) => i !== index))}>×</button></div>)}</div>}
-        <input ref={cameraRef} className="sr-only" type="file" accept="image/jpeg,image/png,image/webp,image/gif" capture="environment" onChange={(event) => {addPhotos(Array.from(event.target.files??[]));event.currentTarget.value='';}} />
+        {photos.length > 0 && <div className="photo-strip">{photos.map((photo, index) => <div key={`${photo.name}-${index}`}><PhotoPreview photo={photo} index={index} /><button onClick={() => setPhotos((all) => all.filter((_, i) => i !== index))}>×</button></div>)}</div>}
         <input ref={uploadRef} className="sr-only" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple onChange={(event) => {addPhotos(Array.from(event.target.files??[]));event.currentTarget.value='';}} />
-        <div className="capture-tools"><button onClick={() => cameraRef.current?.click()}>◉ <span>Take photo</span></button><button onClick={() => uploadRef.current?.click()}>▣ <span>Upload photos</span></button><button onClick={startVoice} className={`voice-tool ${listening ? 'recording' : ''}`}>● <span>{listening ? 'Listening…' : 'Describe by voice'}</span></button></div>
-        <div className="capture-actions"><button className="secondary" disabled={saving} onClick={() => capture(false)}>{saving ? 'Processing…' : 'Save meal'}</button><button className="primary" disabled={saving} onClick={() => capture(true)}>{saving?'Estimating nutrition…':'Review estimate →'}</button></div>
+        <div className="capture-tools">
+          <button type="button" onClick={() => setCameraOpen(true)}>◉ <span>Take photo</span></button>
+          <button type="button" onClick={() => uploadRef.current?.click()}>▣ <span>Upload photos</span></button>
+          <button type="button" onClick={() => voice.status === 'recording' ? voice.stop() : voice.start()} disabled={saving || voice.status === 'transcribing' || voice.status === 'requesting'} className={`voice-tool ${voice.status === 'recording' ? 'recording' : ''}`}>● <span>{voice.status === 'recording' ? 'Stop' : voice.status === 'transcribing' ? 'Writing it down…' : voice.status === 'requesting' ? 'Opening microphone…' : 'Record a voice note'}</span></button>
+        </div>
+        {voice.status !== 'idle' && <div className="voice-panel">
+          <div className="voice-status"><span className="status-dot" /><strong>{voice.status === 'recording' ? 'Recording' : voice.status === 'requesting' ? 'Waiting for microphone permission…' : 'Writing it down…'}</strong><span className="elapsed">{String(Math.floor(voice.seconds / 60)).padStart(2, '0')}:{String(voice.seconds % 60).padStart(2, '0')}</span></div>
+          <div className="voice-meter" aria-hidden="true"><i style={{ '--level': voice.level } as React.CSSProperties} /></div>
+          <div className="item-meta">{voice.status === 'recording' && <button type="button" onClick={voice.stop}>Stop and transcribe</button>}<button type="button" onClick={voice.cancel}>Discard</button></div>
+        </div>}
+        <div className="capture-actions"><button className="secondary" disabled={saving || voice.status !== 'idle'} onClick={() => capture(false)}>{saving ? 'Processing…' : 'Save meal'}</button><button className="primary" disabled={saving || voice.status !== 'idle'} onClick={() => capture(true)}>{saving?'Estimating nutrition…':'Review estimate →'}</button></div>
         <p className="capture-footnote">Your evidence is saved before interpretation. Estimates stay clearly marked until you verify them.</p>
       </section></div>}
+      {cameraOpen && <CameraSheet onCapture={(file) => addPhotos([file])} onClose={closeCamera} onError={setToast} />}
       {toast && <div className="toast" role="status">{toast}</div>}
     </main>
   );
@@ -206,13 +223,40 @@ function TodayView({ timezone, events, library, totals, goals, coverage, selecte
     <div className="page-heading"><div><span className="eyebrow">Journal</span><h1>{isToday ? 'How today is taking shape' : selectedDate.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'})}</h1><p>{isToday ? 'Useful direction, without demanding a perfect log.' : 'Review and refine anything you logged on this day.'}</p></div><button className="primary header-capture" onClick={onCapture}>＋ Add to this day</button></div>
     <div className="date-navigator"><button onClick={()=>moveDay(-1)} aria-label="Previous day">‹</button><label><span>Journal date</span><input type="date" value={selectedDay} onChange={(event)=>setSelectedDay(event.target.value)} /></label><button onClick={()=>moveDay(1)} aria-label="Next day">›</button>{!isToday&&<button className="today-jump" onClick={()=>setSelectedDay(todayKey(timezone))}>Back to today</button>}</div>
     <section className="today-overview">
-      <div className="energy-card"><div className="energy-copy"><span>Energy</span><strong>{round(totals.calories).toLocaleString()}</strong><small>of {goals.calories.toLocaleString()} kcal</small></div><div className="energy-ring" style={{ '--progress': `${progress * 3.6}deg` } as React.CSSProperties}><div><b>{progress}%</b><span>today</span></div></div></div>
+      <DayBand events={events} totals={totals} goals={goals} progress={progress} />
       <div className="macro-grid">{(['protein','carbs','fat','fiber'] as const).map((key) => <Macro key={key} label={key} value={totals[key]} goal={goals[key]} />)}</div>
       <div className="trust-card"><div><span className="status-dot verified" /><strong>{coverage}% verified</strong></div><p>{events.filter((event) => event.status !== 'verified').length ? `${events.filter((event) => event.status !== 'verified').length} ${events.filter((event) => event.status !== 'verified').length === 1 ? 'meal is' : 'meals are'} still estimated.` : events.length ? 'Everything logged today has been reviewed.' : 'Log your first meal to begin.'}</p></div>
     </section>
     <div className="section-title"><div><h2>{isToday ? 'Today’s meals' : 'Meals for this day'}</h2><span>{events.length} {events.length === 1 ? 'event' : 'events'}</span></div></div>
     {events.length ? <div className="event-list">{events.map((event) => <EventCard key={event.id} event={event} library={library} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div> : <button className="empty-state" onClick={onCapture}><span>＋</span><strong>Nothing logged on this day</strong><p>Add a meal now, or choose another date above.</p></button>}
   </>;
+}
+
+/**
+ * The day as a shape rather than a score. Each meal is a column weighted by
+ * its energy and inked by whether you have verified it, so the first thing you
+ * read is how much of today Mise is still guessing at.
+ */
+function DayBand({ events, totals, goals, progress }: { events:EatingEvent[]; totals:Nutrients; goals:Goals; progress:number }) {
+  const estimated = events.filter((event) => event.status !== 'verified')
+    .reduce((sum, event) => sum + eventTotals(event).calories, 0);
+  const remaining = Math.max(0, goals.calories - totals.calories);
+  return <div className="day-band">
+    <div className="band-track">
+      {events.map((event) => {
+        const calories = eventTotals(event).calories;
+        return <div key={event.id} className={`band-meal ${event.status === 'verified' ? '' : 'estimated'}`}
+          style={{ '--weight': Math.max(calories, 1) } as React.CSSProperties}
+          title={`${event.title || event.mealType} · ${round(calories)} kcal · ${statusLabel(event.status)}`} />;
+      })}
+      {remaining > 0 && <div className="band-rest" style={{ '--weight': remaining } as React.CSSProperties} />}
+    </div>
+    <div className="band-figures">
+      <strong>{round(totals.calories).toLocaleString()}</strong>
+      <small>of {goals.calories.toLocaleString()} kcal · {progress}%</small>
+      {estimated > 0 && <span className="estimated-share">{round(estimated).toLocaleString()} kcal still estimated</span>}
+    </div>
+  </div>;
 }
 
 function Macro({ label, value, goal }: { label:string; value:number; goal:number }) { const pct = Math.min(100, Math.round((value/goal)*100)); return <div className={`macro-card ${label}`}><div><span>{label}</span><strong>{round(value)}<small>g</small></strong></div><div className="progress"><i style={{ width: `${pct}%` }} /></div><small>{pct}% of {goal}g</small></div>; }
@@ -285,13 +329,14 @@ function ReviewView({ events, library, expanded, setExpanded, action, saving }: 
   return <><div className="page-heading"><div><span className="eyebrow">Review inbox</span><h1>Resolve what matters</h1><p>Only uncertain meals wait here. Estimates can stay estimates as long as you like.</p></div></div>{events.length ? <div className="review-banner"><span>≈</span><div><strong>{events.length} {events.length === 1 ? 'entry needs' : 'entries need'} a look</strong><p>Recent entries and foods without a reliable source appear here.</p></div></div> : <div className="all-clear"><span>✓</span><h2>You’re all caught up</h2><p>No captured or estimated meals need attention.</p></div>}<div className="event-list">{events.map((event) => <EventCard key={event.id} event={event} library={library} open={expanded === event.id} onToggle={() => setExpanded(expanded === event.id ? null : event.id)} action={action} saving={saving} />)}</div></>;
 }
 
-function TrendsView({ timezone, events, goals, mealTimes, onSave, onDeleteAll }: { timezone:string; events:EatingEvent[]; goals:Goals; mealTimes:MealTimes; onSave:(goals:Goals,mealTimes:MealTimes)=>void; onDeleteAll:()=>void }) {
+function TrendsView({ timezone, events, goals, mealTimes, selectedDay, onSelectDay, onSave, onDeleteAll }: { timezone:string; events:EatingEvent[]; goals:Goals; mealTimes:MealTimes; selectedDay:string; onSelectDay:(day:string)=>void; onSave:(goals:Goals,mealTimes:MealTimes)=>void; onDeleteAll:()=>void }) {
   const [draft, setDraft] = useState(goals);
   const [timeDraft,setTimeDraft]=useState(mealTimes);
   const days = Array.from({ length:7 }, (_, index) => { const date = new Date(); date.setDate(date.getDate() - (6-index)); const key = localDateFor(date, timezone); const dayEvents = events.filter((event) => eventDayKey(event, timezone) === key); return { label:date.toLocaleDateString('en-US',{weekday:'short'}).slice(0,1), totals:sumItems(dayEvents.flatMap((event)=>event.items)), events:dayEvents }; });
   const avg = sumItems(days.flatMap((day) => day.events.flatMap((event) => event.items))); nutrientKeys.forEach((key) => { avg[key] /= 7; });
   const verified = events.filter((event) => event.status === 'verified').length; const completeness = events.length ? Math.round(events.flatMap((e)=>e.items).reduce((s,i)=>s+i.completeness,0)/Math.max(1,events.flatMap((e)=>e.items).length)*100) : 0;
-  return <><div className="page-heading"><div><span className="eyebrow">Profile & last 7 days</span><h1>Your patterns and defaults</h1><p>Set your goals and usual meal times, then see how the week is taking shape.</p></div></div><section className="goals-card profile-card"><div><span className="eyebrow">Your profile</span><h2>Goals & meal rhythm</h2><p>Choosing a meal during capture will start at its usual time. You can still adjust it for any entry.</p></div><div className="profile-fields"><div className="goal-fields">{nutrientKeys.map((key)=><label key={key}>{key}<span><input type="number" value={draft[key]} onChange={(e)=>setDraft({...draft,[key]:Number(e.target.value)})}/>{key==='calories'?'kcal':'g'}</span></label>)}</div><div className="meal-defaults"><strong>Usual meal times</strong><div className="meal-time-grid">{(Object.keys(timeDraft) as Array<keyof MealTimes>).map((type)=><label key={type}>{type}<input type="time" value={timeDraft[type]} onChange={(event)=>setTimeDraft({...timeDraft,[type]:event.target.value})}/></label>)}</div></div><button className="primary profile-save" onClick={()=>onSave(draft,timeDraft)}>Save profile</button></div></section><div className="trend-grid"><section className="chart-card"><div className="chart-head"><div><span>Daily energy</span><strong>{round(avg.calories).toLocaleString()} <small>kcal avg</small></strong></div><span className="soft-pill">7 days</span></div><div className="bar-chart">{days.map((day,index) => <div key={index} className="bar-column"><div className="bar-track"><i style={{ height:`${Math.min(100,(day.totals.calories/goals.calories)*100)}%` }} /></div><span>{day.label}</span></div>)}</div><div className="goal-line"><i />Goal: {goals.calories.toLocaleString()} kcal</div></section><section className="quality-card"><span className="detail-label">Data quality</span><Quality value={events.length ? Math.round((verified/events.length)*100) : 0} label="Events verified" color="#2e7451" /><Quality value={completeness} label="Nutrient coverage" color="#e4a943" /><p>Coverage reflects whether nutrient values are known—not whether your intake is “good.”</p></section></div><section className="averages-card"><div className="section-title"><div><h2>Daily averages</h2><span>Across the last week</span></div></div><div className="average-grid">{(['protein','carbs','fat','fiber'] as const).map((key)=><div key={key}><span>{key}</span><strong>{round(avg[key])}g</strong><small>{Math.round((avg[key]/goals[key])*100)}% of target</small></div>)}</div></section><section className="data-card"><div><span className="eyebrow">Data control</span><h2>Your journal belongs to you</h2><p>Use the download button in the header for a complete JSON export. Original photos remain available from each meal.</p></div><button onClick={onDeleteAll}>Delete all my data</button></section></>;
+  return <><div className="page-heading"><div><h1>Your patterns and defaults</h1><p>Set your goals and usual meal times, then see how the week is taking shape.</p></div></div><section className="goals-card profile-card"><div><span className="eyebrow">Your profile</span><h2>Goals & meal rhythm</h2><p>Choosing a meal during capture will start at its usual time. You can still adjust it for any entry.</p></div><div className="profile-fields"><div className="goal-fields">{nutrientKeys.map((key)=><label key={key}>{key}<span><input type="number" value={draft[key]} onChange={(e)=>setDraft({...draft,[key]:Number(e.target.value)})}/>{key==='calories'?'kcal':'g'}</span></label>)}</div><div className="meal-defaults"><strong>Usual meal times</strong><div className="meal-time-grid">{(Object.keys(timeDraft) as Array<keyof MealTimes>).map((type)=><label key={type}>{type}<input type="time" value={timeDraft[type]} onChange={(event)=>setTimeDraft({...timeDraft,[type]:event.target.value})}/></label>)}</div></div><button className="primary profile-save" disabled={nutrientKeys.some(key=>!Number.isFinite(draft[key])||draft[key]<=0)||Object.values(timeDraft).some(time=>!time)} onClick={()=>onSave(draft,timeDraft)}>Save profile</button></div></section><MonthCalendar events={events} goalCalories={goals.calories} timezone={timezone} selectedDay={selectedDay} onSelectDay={onSelectDay} />
+  <div className="trend-grid"><section className="chart-card"><div className="chart-head"><div><span>Daily energy</span><strong>{round(avg.calories).toLocaleString()} <small>kcal avg</small></strong></div><span className="soft-pill">7 days</span></div><div className="bar-chart">{days.map((day,index) => <div key={index} className="bar-column"><div className="bar-track"><i style={{ height:`${Math.min(100,(day.totals.calories/goals.calories)*100)}%` }} /></div><span>{day.label}</span></div>)}</div><div className="goal-line"><i />Goal: {goals.calories.toLocaleString()} kcal</div></section><section className="quality-card"><span className="detail-label">Data quality</span><Quality value={events.length ? Math.round((verified/events.length)*100) : 0} label="Events verified" color="#2e7451" /><Quality value={completeness} label="Nutrient coverage" color="#e4a943" /><p>Coverage reflects whether nutrient values are known—not whether your intake is “good.”</p></section></div><section className="averages-card"><div className="section-title"><div><h2>Daily averages</h2><span>Across the last week</span></div></div><div className="average-grid">{(['protein','carbs','fat','fiber'] as const).map((key)=><div key={key}><span>{key}</span><strong>{round(avg[key])}g</strong><small>{Math.round((avg[key]/goals[key])*100)}% of target</small></div>)}</div></section><section className="data-card"><div><span className="eyebrow">Data control</span><h2>Your journal belongs to you</h2><p>Use the download button in the header for a complete JSON export. Original photos remain available from each meal.</p></div><button onClick={onDeleteAll}>Delete all my data</button></section></>;
 }
 function Quality({ value,label,color }:{value:number;label:string;color:string}) { return <div className="quality"><div><span>{label}</span><strong>{value}%</strong></div><div className="progress"><i style={{width:`${value}%`,background:color}} /></div></div>; }
 
@@ -300,17 +345,17 @@ function LibraryView({ items, onSave, onDelete, onLog, saving }:{onLog:(itemId:s
   const [researchTarget,setResearchTarget]=useState('');
   const [receiptBusy,setReceiptBusy]=useState(false);
   const [receiptMessage,setReceiptMessage]=useState('');
-  const [receiptItems,setReceiptItems]=useState<Array<{name:string;alias:string;selected:boolean}>>([]);
+  const [receiptItems,setReceiptItems]=useState<Array<ReceiptFood & {selected:boolean}>>([]);
   function editPart(index:number,changes:Partial<FoodItem>){setDraft(current=>({...current,components:current.components?.map((part,i)=>i===index?{...part,...changes}:part)}));}
   function lookupSaved(item:LibraryItem){setResearchQuery(item.name);setResearchTarget(item.id);setResearchResults([]);setResearchMessage('Review the search, then choose Research food to find its nutrition.');window.scrollTo({top:0,behavior:'smooth'});}
   async function uploadReceipt(file:File){
     setReceiptBusy(true);setReceiptItems([]);setReceiptMessage('Reading food items…');
     try{
       const form=new FormData();form.append('receipt',file);
-      const response=await fetch('/api/receipt',{method:'POST',body:form});const data=await response.json() as {items?:Array<{name:string;alias:string}>;error?:string};
+      const response=await fetch('/api/receipt',{method:'POST',body:form});const data=await response.json() as {items?:ReceiptFood[];error?:string};
       if(!response.ok)throw new Error(data.error||'Could not read this receipt.');
-      const found=(data.items as Array<{name:string;alias:string}>).filter(food=>!items.some(saved=>saved.name.toLowerCase()===food.name.toLowerCase()));
-      setReceiptItems(found.map(food=>({...food,selected:true})));setReceiptMessage(found.length?'Review these foods before adding them.':'No new, clearly identifiable food items found.');
+      const found=(data.items ?? []).filter(food=>!items.some(saved=>saved.name.toLowerCase()===food.name.toLowerCase()));
+      setReceiptItems(found.map(food=>({...food,selected:!food.needsConfirmation})));setReceiptMessage(found.length?'Review these foods before adding them.':'No new, clearly identifiable food items found.');
     }catch(error){setReceiptMessage(error instanceof Error?error.message:'Could not read this receipt.');}finally{setReceiptBusy(false);}
   }
   async function saveReceipt(){
@@ -318,7 +363,7 @@ function LibraryView({ items, onSave, onDelete, onLog, saving }:{onLog:(itemId:s
     const selected=receiptItems.filter(item=>item.selected&&item.name.trim());
     try{for(const food of selected){
       setReceiptMessage(`Finding nutrition and saving ${savedCount+1} of ${selected.length}: ${food.name}…`);
-      if(!await onSave({...blank,name:food.name,alias:food.alias,nutritionPending:true,sourceLabel:'Receipt · nutrition pending'})){setReceiptMessage('Some items could not be saved. Unsaved foods are still here to retry.');return;}
+      if(!await onSave({...blank,name:food.name,alias:food.alias,lookupQuery:buildLookupQuery(food),nutritionPending:true,sourceLabel:'Receipt · nutrition pending'})){setReceiptMessage('Some items could not be saved. Unsaved foods are still here to retry.');return;}
       savedCount++;setReceiptItems(all=>all.filter(item=>item!==food));
     }setReceiptMessage(`${savedCount} food${savedCount===1?'':'s'} added. Nutrition was searched automatically; any unmatched foods are marked for review.`);}finally{setReceiptBusy(false);}
   }
@@ -342,8 +387,18 @@ function LibraryView({ items, onSave, onDelete, onLog, saving }:{onLog:(itemId:s
   return <>
     <div className="page-heading"><div><span className="eyebrow">Personal library</span><h1>Your foods, remembered</h1><p>Research a label once. Mise reuses it—and converts familiar portions—next time.</p></div><button className="primary" onClick={()=>{setDraft(blank);setAdding(true);}}>＋ Add manually</button></div>
     <section className="research-card"><div className="research-intro"><span className="research-mark">✦</span><div><span className="eyebrow">Food researcher</span><h2>Find a food or product</h2><p>Checks nutrition databases and the web, using your saved foods as clues. Review the match and serving before saving.</p></div></div><form className="research-search" onSubmit={(event)=>{event.preventDefault();research();}}><input aria-label="Food to research" maxLength={100} disabled={researching} value={researchQuery} onChange={(event)=>{setResearchQuery(event.target.value);setResearchTarget('');}} placeholder="Try “jammy balls” or “Brami pasta”"/><button className="primary" disabled={researching}>{researching?'Researching…':'Research food'}</button></form><label className="research-message">Eating preferences or clues (optional)<input aria-label="Eating preferences or clues" maxLength={300} disabled={researching} value={researchContext} onChange={event=>setResearchContext(event.target.value)} placeholder="e.g. plant-based snacks, peanut butter flavor"/></label>{researching&&<p className="research-message" role="status">Checking products and nutrition sources… this can take about a minute.</p>}{researchMessage&&<p className="research-message" role="status">{researchMessage}</p>}{researchResults.length>0&&<div className="research-results">{researchResults.map((result,index)=><article key={result.id} className="research-result"><div className="result-rank">{index+1}</div><div className="result-main"><span>{result.brand||'Food'}</span><h3>{result.description}</h3><p>Per {result.serving} · {round(result.calories)} kcal · P {round(result.protein)}g · C {round(result.carbs)}g · F {round(result.fat)}g</p><a href={result.sourceUrl} target="_blank" rel="noreferrer">{result.sourceLabel} ↗</a></div>{/\bpasta\b/i.test(result.description)&&<label className="conversion-field">Cooked conversion<span>1 cup cooked = <input type="number" min="0.1" step="0.1" value={result.servingsPerCookedCup??1} onChange={(event)=>setResearchResults((all)=>all.map((item)=>item.id===result.id?{...item,servingsPerCookedCup:Number(event.target.value)}:item))}/> label serving</span><small>Adjust if your package gives a different cooked yield.</small></label>}<button className="save-result" disabled={saving} onClick={()=>saveResearch(result)}>Save to Library</button></article>)}</div>}</section>
-    <section className="research-card"><h2>Add foods from a receipt</h2><p>Upload a receipt to remember groceries and snacks. Only clearly identified food and drink items are suggested. When you add the selected foods, nutrition is researched and saved automatically. Uncertain matches are marked for review.</p><label>Receipt photo<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={receiptBusy||saving} onChange={event=>{const file=event.target.files?.[0];if(file)uploadReceipt(file);event.target.value='';}}/></label>{receiptMessage&&<p role="status">{receiptMessage}</p>}{receiptItems.map((item,index)=><div className="research-search receipt-food-row" key={index}><input type="checkbox" aria-label={`Include ${item.name}`} checked={item.selected} disabled={receiptBusy} onChange={event=>setReceiptItems(all=>all.map((food,i)=>i===index?{...food,selected:event.target.checked}:food))}/><input aria-label={`Receipt food ${index+1}`} value={item.name} maxLength={200} disabled={receiptBusy} onChange={event=>setReceiptItems(all=>all.map((food,i)=>i===index?{...food,name:event.target.value}:food))}/></div>)}{receiptItems.length>0&&<button className="primary" disabled={receiptBusy||saving||!receiptItems.some(item=>item.selected&&item.name.trim())} onClick={saveReceipt}>{receiptBusy?'Finding nutrition…':'Add foods & find nutrition'}</button>}</section>
+    <section className="research-card"><h2>Add foods from a receipt</h2><p>Upload a receipt to remember groceries and snacks. Review the food names and check any uncertain suggestions you want to include. When you add the selected foods, nutrition is researched and saved automatically. Uncertain matches are marked for review.</p><label>Receipt photo<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={receiptBusy||saving} onChange={event=>{const file=event.target.files?.[0];if(file)uploadReceipt(file);event.target.value='';}}/></label>{receiptMessage&&<p role="status">{receiptMessage}</p>}{receiptItems.map((item,index)=><div className="research-search receipt-food-row" key={index}>{item.needsConfirmation && <span className="status estimated">Check name</span>}<input type="checkbox" aria-label={`Include ${item.name}${item.needsConfirmation ? ", uncertain receipt reading" : ""}`} checked={item.selected} disabled={receiptBusy} onChange={event=>setReceiptItems(all=>all.map((food,i)=>i===index?{...food,selected:event.target.checked}:food))}/><input aria-label={`Receipt food ${index+1}`} title={item.needsConfirmation ? "Uncertain receipt reading — review before including" : undefined} value={item.name} maxLength={200} disabled={receiptBusy} onChange={event=>setReceiptItems(all=>all.map((food,i)=>i===index?{...food,name:event.target.value}:food))}/></div>)}{receiptItems.length>0&&<button className="primary" disabled={receiptBusy||saving||!receiptItems.some(item=>item.selected&&item.name.trim())} onClick={saveReceipt}>{receiptBusy?'Finding nutrition…':'Add foods & find nutrition'}</button>}</section>
     {adding&&<section className="library-form"><div className="capture-head"><div><span className="eyebrow">{draft.id?'Edit library item':'New library item'}</span><h2>{draft.id?draft.name:'Save a reliable shortcut'}</h2></div><button className="close-button" onClick={()=>setAdding(false)}>×</button></div><div className="form-grid"><label className="wide">Name<input value={draft.name} onChange={e=>setDraft({...draft,name:e.target.value})} placeholder="Overnight oats"/></label><label>Type<select value={draft.kind} onChange={e=>setDraft({...draft,kind:e.target.value as LibraryItem['kind']})}><option value="food">Food</option><option value="recipe">Recipe</option><option value="meal">Meal</option></select></label><label>Aliases<input value={draft.alias} onChange={e=>setDraft({...draft,alias:e.target.value})} placeholder="usual oats, breakfast oats"/></label><label>Amount<input type="number" value={draft.quantity} onChange={e=>setDraft({...draft,quantity:Number(e.target.value)})}/></label><label>Unit<input value={draft.unit} onChange={e=>setDraft({...draft,unit:e.target.value})}/></label>{draft.nutritionPending&&<label className="wide"><input type="checkbox" checked={!draft.nutritionPending} onChange={()=>setDraft({...draft,nutritionPending:false})}/> I have entered nutrition for the serving below</label>}{nutrientKeys.map(key=><label key={key}>{key}<input type="number" disabled={Boolean(draft.components?.length)} min={0} value={draft[key]} onChange={e=>setDraft({...draft,[key]:Number(e.target.value)})}/></label>)}<label>Serving weight (g)<input type="number" min="0.01" value={draft.servingGrams??''} onChange={e=>setDraft({...draft,servingGrams:e.target.value?Number(e.target.value):null})}/></label><label>Servings per cooked cup<input type="number" min="0.01" value={draft.servingsPerCookedCup??''} onChange={e=>setDraft({...draft,servingsPerCookedCup:e.target.value?Number(e.target.value):null})}/></label>{(['iron','calcium','vitaminC'] as const).map(key=><label key={key}>{key} (mg)<input disabled={Boolean(draft.components?.length)} type="number" min="0" value={draft[key]??''} onChange={e=>setDraft({...draft,[key]:e.target.value?Number(e.target.value):null})}/></label>)}<label className="wide">Source link<input type="url" value={draft.sourceUrl} onChange={e=>setDraft({...draft,sourceUrl:e.target.value})}/></label>{draft.components?.map((part,index)=><fieldset className="wide form-grid library-ingredient" key={part.id}><legend>Ingredient {index+1}</legend><label>Name<input value={part.name} onChange={e=>editPart(index,{name:e.target.value})}/></label><label>Amount<input type="number" min="0.01" value={part.quantity} onChange={e=>editPart(index,{quantity:Number(e.target.value)})}/></label><label>Unit<input value={part.unit} onChange={e=>editPart(index,{unit:e.target.value})}/></label>{nutrientKeys.map(key=><label key={key}>{key}<input type="number" min="0" value={part[key]} onChange={e=>editPart(index,{[key]:Number(e.target.value)})}/></label>)}</fieldset>)}</div><button className="primary" disabled={saving||!draft.name.trim()||draft.quantity<=0||!draft.unit.trim()} onClick={submit}>{saving?'Saving…':draft.id?'Save changes':'Save to library'}</button></section>}
-    {items.length?<><div className="section-title"><div><h2>Saved foods</h2><span>{items.length} in your library</span></div></div><div className="library-grid">{items.map(item=><article key={item.id} className="library-card"><div className={`library-icon ${item.kind}`}>{item.kind==='recipe'?'R':item.kind==='meal'?'M':'F'}</div><span className="soft-pill">{item.kind}</span><h3>{item.name}</h3>{item.components?.length? <details className="saved-components"><summary>{item.components.length} saved ingredients</summary>{item.components.map((part,index)=><div key={`${part.id}-${index}`}><strong>{part.name}</strong><span>{part.quantity} {part.unit} · {round(part.calories)} kcal</span></div>)}<p>Use Edit to update the saved ingredients.</p></details>:null}<p>{item.nutritionPending?'Nutrition not yet verified':`${item.quantity} ${item.unit} · ${round(item.calories)} kcal`}</p>{item.servingsPerCookedCup&&<p className="conversion-note">1 cooked cup = {item.servingsPerCookedCup} serving{item.servingsPerCookedCup===1?'':'s'}</p>}{item.alias&&<blockquote>Matches “{item.alias}”</blockquote>}<div className="library-macros">{!item.nutritionPending&&<><span>P {round(item.protein)}g</span><span>C {round(item.carbs)}g</span><span>F {round(item.fat)}g</span></>}</div><button className="primary" disabled={saving} onClick={()=>item.nutritionPending?lookupSaved(item):onLog(item.id)}>{item.nutritionPending?'Find nutrition':'Log to today'}</button><div className="library-links">{item.sourceUrl&&<a className="library-source" href={item.sourceUrl} target="_blank" rel="noreferrer">{item.sourceLabel} ↗</a>}<button disabled={saving} onClick={()=>{setDraft(structuredClone(item));setAdding(true);}}>Edit</button><button disabled={saving} onClick={()=>onDelete(item.id)}>Remove</button></div></article>)}</div></>:!adding&&<div className="all-clear"><span>◇</span><h2>Your library is ready</h2><p>Research a branded food above, or add a custom food manually.</p></div>}
+    {items.length?<><div className="section-title"><div><h2>Saved foods</h2><span>{items.length} in your library</span></div></div><div className="library-grid">{items.map(item=><article key={item.id} className="library-card"><div className={`library-icon ${item.kind}`}>{item.kind==='recipe'?'R':item.kind==='meal'?'M':'F'}</div><span className="soft-pill">{item.kind}</span><h3>{item.name}</h3>{item.components?.length? <details className="saved-components"><summary>{item.components.length} saved ingredients</summary>{item.components.map((part,index)=><div key={`${part.id}-${index}`}><strong>{part.name}</strong><span>{part.quantity} {part.unit} · {round(part.calories)} kcal</span></div>)}<p>Use Edit to update the saved ingredients.</p></details>:null}{item.nutritionPending && <p className="research-message">{item.sourceLabel}</p>}<p>{item.nutritionPending?'Nutrition not yet verified':`${item.quantity} ${item.unit} · ${round(item.calories)} kcal`}</p>{item.servingsPerCookedCup&&<p className="conversion-note">1 cooked cup = {item.servingsPerCookedCup} serving{item.servingsPerCookedCup===1?'':'s'}</p>}{item.alias&&<blockquote>Matches “{item.alias}”</blockquote>}<div className="library-macros">{!item.nutritionPending&&<><span>P {round(item.protein)}g</span><span>C {round(item.carbs)}g</span><span>F {round(item.fat)}g</span></>}</div><button className="primary" disabled={saving} onClick={()=>item.nutritionPending?lookupSaved(item):onLog(item.id)}>{item.nutritionPending?'Find nutrition':'Log to today'}</button><div className="library-links">{item.sourceUrl&&<a className="library-source" href={item.sourceUrl} target="_blank" rel="noreferrer">{item.sourceLabel} ↗</a>}<button disabled={saving} onClick={()=>{setDraft(structuredClone(item));setAdding(true);}}>Edit</button><button disabled={saving} onClick={()=>onDelete(item.id)}>Remove</button></div></article>)}</div></>:!adding&&<div className="all-clear"><span>◇</span><h2>Your library is ready</h2><p>Research a branded food above, or add a custom food manually.</p></div>}
   </>;
+}
+
+function PhotoPreview({ photo, index }: { photo: File; index: number }) {
+  const imageRef = useRef<HTMLImageElement>(null);
+  useEffect(() => {
+    const url = URL.createObjectURL(photo);
+    if (imageRef.current) imageRef.current.src = url;
+    return () => URL.revokeObjectURL(url);
+  }, [photo]);
+  return <img ref={imageRef} alt={`Meal evidence ${index + 1}`} />;
 }

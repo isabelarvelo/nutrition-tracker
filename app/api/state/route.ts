@@ -423,7 +423,11 @@ export async function POST(request: Request) {
         const candidates=providers.flatMap(result=>result.status==='fulfilled'?result.value:[]);
         if(!env.OPENAI_API_KEY?.trim())return {results:[]};
         return researchFoodWeb(query,candidates,{savedFoods:[]},{apiKey:env.OPENAI_API_KEY.trim(),model:env.OPENAI_MODEL?.trim(),automaticReceipt:true});
-      });
+      }, {lookupQuery:item.lookupQuery??item.name,brand:null,packageSize:null});
+      if (item.nutritionPending) {
+        const reasons: Record<string, string> = { no_match:'no nutrition match found', low_confidence:'review the food identity', incomplete_source:'nutrition source incomplete', ambiguous_match:'multiple possible matches', lookup_failed:'research unavailable; try again' };
+        item.sourceLabel = `Receipt · ${reasons[item.unresolvedReason ?? ''] ?? 'nutrition pending'}`;
+      }
     }
     await env.DB.prepare(`INSERT INTO library_items (id,user_id,name,kind,alias,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,serving_grams,servings_per_cooked_cup,source_label,source_url,created_at,nutrition_pending) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.userId,item.name,item.kind,item.alias,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,item.servingGrams ?? null,item.servingsPerCookedCup ?? null,item.sourceLabel ?? '',item.sourceUrl ?? '',now,item.nutritionPending?1:0).run();
   } else if (action === 'delete_library') {
