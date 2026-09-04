@@ -11,7 +11,7 @@
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test app/lib/dates.test.mjs app/lib/resolve/amount.test.mjs app/lib/resolve/parse.test.mjs app/lib/resolve/estimate.test.mjs app/lib/resolve/web-food.test.mjs",
+    "test": "node --experimental-strip-types --test app/lib/dates.test.mjs app/lib/resolve/amount.test.mjs app/lib/resolve/parse.test.mjs app/lib/resolve/estimate.test.mjs app/lib/resolve/web-food.test.mjs app/lib/resolve/receipt.test.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "wrangler d1 migrations apply"
   },

@@ -66,6 +66,7 @@ export type EatingEvent = {
 };
 
 export type LibraryItem = Nutrients & {
+  nutritionPending?: boolean;
   components?: FoodItem[];
   id: string;
   name: string;

@@ -15,7 +15,7 @@ test('uses pasta context to normalize brand, oil, and Parmesan shorthand', () =>
 test('returns a meal title separately from components and prompts against composite double counting',async()=>{
   const original=globalThis.fetch;let body;
   globalThis.fetch=async(_,init)=>{body=JSON.parse(init.body);return Response.json({output_text:JSON.stringify({title:'Egg bagel sandwich',items:[{rawText:'1 bagel',name:'Bagel',brand:null,quantity:1,unit:'bagel',preparation:null,searchQuery:'bagel',confidence:.8,needsClarification:null},{rawText:'1 egg',name:'Egg',brand:null,quantity:1,unit:'large',preparation:'fried',searchQuery:'fried egg',confidence:.8,needsClarification:null}]})});};
-  try{const meal=await parseMealBundle('',[{mimeType:'image/png',base64:'test'}],{apiKey:'test'});assert.equal(meal.title,'Egg bagel sandwich');assert.equal(meal.items.length,2);assert.ok(body.text.format.schema.required.includes('title'));assert.match(body.instructions,/even when commercially prepared/);assert.match(body.instructions,/Never return both/);assert.doesNotMatch(body.instructions,/Keep a commercially sold composite dish together/);}
+  try{const meal=await parseMealBundle('',[{mimeType:'image/png',base64:'test'}],{apiKey:'test'});assert.equal(meal.title,'Egg bagel sandwich');assert.equal(meal.items.length,2);assert.ok(body.text.format.schema.required.includes('title'));assert.match(body.instructions,/preserve it as ONE branded item/);assert.match(body.instructions,/Never return both/);assert.doesNotMatch(body.instructions,/Keep a commercially sold composite dish together/);}
   finally{globalThis.fetch=original;}
 });
 

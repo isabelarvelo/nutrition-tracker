@@ -14,6 +14,7 @@ export const loggedItems = sqliteTable('logged_items', {
 }, (table) => [index('idx_logged_items_event').on(table.eventId)]);
 
 export const libraryItems = sqliteTable('library_items', {
+  nutritionPending: integer('nutrition_pending', { mode: 'boolean' }).notNull().default(false),
   components: text('components'),
   id: text('id').primaryKey(), userId: text('user_id').notNull(), name: text('name').notNull(), kind: text('kind').notNull(), alias: text('alias').notNull().default(''), quantity: real('quantity').notNull(), unit: text('unit').notNull(), calories: real('calories').notNull(), protein: real('protein').notNull(), carbs: real('carbs').notNull(), fat: real('fat').notNull(), fiber: real('fiber').notNull(), iron: real('iron'), calcium: real('calcium'), vitaminC: real('vitamin_c'), servingGrams: real('serving_grams'), servingsPerCookedCup: real('servings_per_cooked_cup'), sourceLabel: text('source_label').notNull().default(''), sourceUrl: text('source_url').notNull().default(''), createdAt: text('created_at').notNull(),
 }, (table) => [index('idx_library_user').on(table.userId)]);

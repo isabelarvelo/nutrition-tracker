@@ -7,6 +7,7 @@ import { actionSchema, capturePayloadSchema, validationError } from '../../lib/s
 import { findLibraryMatch, parseAmount } from '../../lib/resolve/amount';
 import { parseMealBundle, type MealImageInput } from '../../lib/resolve/parse';
 import { libraryComponents, mealTitle } from '../../lib/resolve/groups';
+import { researchFoodWeb } from '../../lib/resolve/web-food';
 import { estimateFoods, applyEstimate, isComponentMatch } from '../../lib/resolve/estimate';
 
 export const dynamic = 'force-dynamic';
@@ -85,7 +86,7 @@ async function getState(userId: string) {
     items: itemsByEvent.get(String(event.id)) ?? [],
     evidence: evidenceByEvent.get(String(event.id)) ?? [],
   }));
-  const library = libraryResult.results.map((row): LibraryItem => ({ ...mapItem({ ...row, source: 'personal', confidence: 1, completeness: .95 }), components:row.components?JSON.parse(String(row.components)) as FoodItem[]:undefined, kind: String(row.kind) as LibraryItem['kind'], alias: String(row.alias), servingGrams: row.serving_grams == null ? null : Number(row.serving_grams), servingsPerCookedCup: row.servings_per_cooked_cup == null ? null : Number(row.servings_per_cooked_cup), sourceLabel: String(row.source_label ?? ''), sourceUrl: String(row.source_url ?? '') }));
+  const library = libraryResult.results.map((row): LibraryItem => ({ ...mapItem({ ...row, source: 'personal', confidence: 1, completeness: .95 }), components:row.components?JSON.parse(String(row.components)) as FoodItem[]:undefined, nutritionPending: Boolean(row.nutrition_pending), kind: String(row.kind) as LibraryItem['kind'], alias: String(row.alias), servingGrams: row.serving_grams == null ? null : Number(row.serving_grams), servingsPerCookedCup: row.servings_per_cooked_cup == null ? null : Number(row.servings_per_cooked_cup), sourceLabel: String(row.source_label ?? ''), sourceUrl: String(row.source_url ?? '') }));
   return { events, library, goals: goal ? { calories: Number(goal.calories), protein: Number(goal.protein), carbs: Number(goal.carbs), fat: Number(goal.fat), fiber: Number(goal.fiber) } : DEFAULT_GOALS, mealTimes:goal?{Breakfast:String(goal.breakfast_time??DEFAULT_MEAL_TIMES.Breakfast),Lunch:String(goal.lunch_time??DEFAULT_MEAL_TIMES.Lunch),Dinner:String(goal.dinner_time??DEFAULT_MEAL_TIMES.Dinner),Snack:String(goal.snack_time??DEFAULT_MEAL_TIMES.Snack)}:DEFAULT_MEAL_TIMES, timezone: String(goal?.timezone ?? DEFAULT_TIMEZONE) };
 }
 
@@ -142,7 +143,7 @@ function toCandidate(result:FoodResearchResult, providerId:'usda'|'off', segment
 async function interpretedItems(text: string, library: LibraryItem[], photos: MealImageInput[],requireModel=false) {
   const savedGroup=!photos.length?library.find(item=>item.components?.length&&[item.name,...item.alias.split(',')].some(name=>name.trim().toLowerCase()===text.trim().toLowerCase())):undefined;
   if(savedGroup)return {title:savedGroup.name,items:libraryComponents(savedGroup)};
-  const bundle = (text.trim() || photos.length) ? await parseMealBundle(text,photos,{requireModel,apiKey:env.OPENAI_API_KEY?.trim(),model:photos.length?(env.OPENAI_VISION_MODEL?.trim()||'gpt-5.6-luna'):env.OPENAI_MODEL?.trim()}):{title:'',items:[]};
+  const bundle = (text.trim() || photos.length) ? await parseMealBundle(text,photos,{requireModel,apiKey:env.OPENAI_API_KEY?.trim(),savedFoods:library.map(({name,alias})=>({name,alias})).slice(0,100),model:photos.length?(env.OPENAI_VISION_MODEL?.trim()||'gpt-5.6-luna'):env.OPENAI_MODEL?.trim()}):{title:'',items:[]};
   const parsedFoods=bundle.items;
   const apiKey=env.USDA_API_KEY?.trim();
   const items:FoodItem[]=[];
@@ -155,7 +156,9 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
     const items:FoodItem[]=[];
     const segment=parsedFood.rawText;
     const candidates:NonNullable<FoodItem['candidates']>=[];
-    const saved = findLibraryMatch(segment, library);
+    const brandKey=(value:string)=>value.toLowerCase().replace(/[^a-z0-9]/g,'');
+    const sameBrand=(name:string)=>!parsedFood.brand||brandKey(name).includes(brandKey(parsedFood.brand));
+    const saved = findLibraryMatch(segment, library.filter(item=>!item.nutritionPending&&sameBrand(item.name)));
     if (saved) {
       const amount = parseAmount(segment, saved.quantity, saved.unit, saved);
       if(saved.components?.length&&amount.scale!=null)return libraryComponents(saved,amount.scale);
@@ -163,15 +166,22 @@ async function interpretedItems(text: string, library: LibraryItem[], photos: Me
       items.push({ ...saved, id: crypto.randomUUID(), quantity: amount.quantity, unit: amount.unit, ...scaleNutrients(saved, amount.scale), source: 'Personal Library', sourceUrl:saved.sourceUrl, libraryItemId:saved.id, confidence: 1, completeness: .95, resolutionTier:'library' });return items;
     }
     const query=parsedFood.searchQuery;
+    if(parsedFood.brand&&env.OPENAI_API_KEY){
+      try{
+        const researched=await researchFoodWeb(query,[],{savedFoods:[]},{apiKey:env.OPENAI_API_KEY.trim(),model:env.OPENAI_MODEL?.trim()});
+        const result=researched.results.find(item=>sameBrand(item.name)&&canApplyServing(segment,item));
+        if(result)return [{...fromResearch(segment,result,Math.min(parsedFood.confidence,result.matchScore)),resolutionTier:'web',clarificationQuestion:parsedFood.needsClarification}];
+      }catch{console.warn('Brand nutrition research unavailable');}
+    }
     const normalizedQuery=query.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
     const food=catalog.find((item)=>item.terms.some((term)=>item.exact?normalizedQuery===term:normalizedQuery.includes(term)));
     const preferStandard=/^(?:olive oil|parmesan cheese)$/.test(normalizedQuery);
     if(preferStandard&&food){const amount=parseAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:parsedFood.confidence,completeness:.86,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
-    try{if(!apiKey)throw new Error('USDA_API_KEY is not configured');const researched=await researchFoods(query,apiKey,false,8);researched.results=researched.results.filter(candidate=>isComponentMatch(query,candidate.name));candidates.push(...researched.results.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'usda',segment)));const result=researched.results.find((candidate)=>candidate.matchScore>=.6&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.95,.7+result.matchScore*.25)),candidates,clarificationQuestion:parsedFood.needsClarification});return items;}}
+    try{if(!apiKey)throw new Error('USDA_API_KEY is not configured');const researched=await researchFoods(query,apiKey,false,8);researched.results=researched.results.filter(candidate=>sameBrand(candidate.name)&&isComponentMatch(query,candidate.name));candidates.push(...researched.results.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'usda',segment)));const result=researched.results.find((candidate)=>candidate.matchScore>=.6&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.95,.7+result.matchScore*.25)),candidates,clarificationQuestion:parsedFood.needsClarification});return items;}}
     catch(error){console.warn('USDA food resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
-    try{const webResults=(await researchOpenFoodFacts(query,6)).filter(candidate=>isComponentMatch(query,candidate.name));candidates.push(...webResults.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'off',segment)));const result=webResults.find((candidate)=>candidate.matchScore>=.65&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.86,.55+result.matchScore*.3)),candidates:candidates.slice(0,3),clarificationQuestion:parsedFood.needsClarification});return items;}}
+    try{const webResults=(await researchOpenFoodFacts(query,6)).filter(candidate=>sameBrand(candidate.name)&&isComponentMatch(query,candidate.name));candidates.push(...webResults.filter(candidate=>candidate.matchScore>=.5).slice(0,3).map((candidate)=>toCandidate(candidate,'off',segment)));const result=webResults.find((candidate)=>candidate.matchScore>=.65&&candidate.calories>0&&canApplyServing(segment,candidate));if(result){items.push({...fromResearch(segment,result,Math.min(parsedFood.confidence,.86,.55+result.matchScore*.3)),candidates:candidates.slice(0,3),clarificationQuestion:parsedFood.needsClarification});return items;}}
     catch(error){console.warn('Open Food Facts resolution failed',{query,error:error instanceof Error?error.message:String(error)});}
-    if(food?.exact){const amount=parseAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:Math.min(parsedFood.confidence,.9),completeness:.86,candidates,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
+    if(food?.exact&&!parsedFood.brand){const amount=parseAmount(segment,food.quantity,food.unit);if(amount.scale!=null){items.push({id:crypto.randomUUID(),name:food.name,quantity:amount.quantity,unit:amount.unit,...scaleNutrients(food.nutrients,amount.scale),source:food.sourceLabel??'Best inference · standard reference',sourceUrl:food.sourceUrl??'',libraryItemId:null,confidence:Math.min(parsedFood.confidence,.9),completeness:.86,candidates,resolutionTier:'structured',clarificationQuestion:parsedFood.needsClarification});return items;}}
     const amount={quantity:parsedFood.quantity??1,unit:parsedFood.unit??'serving'};
     const reason=candidates.length?'unit_mismatch':'no_match';
     items.push({id:crypto.randomUUID(),name:parsedFood.name,quantity:amount.quantity,unit:amount.unit,calories:0,protein:0,carbs:0,fat:0,fiber:0,iron:null,calcium:null,vitaminC:null,source:'Needs research',sourceUrl:'',libraryItemId:null,confidence:0,completeness:0,candidates:candidates.sort((a,b)=>b.matchScore-a.matchScore).slice(0,3),resolutionTier:'unresolved',unresolvedReason:reason,clarificationQuestion:parsedFood.needsClarification??(candidates.length?'Which of these matches what you ate?':null)});
@@ -315,6 +325,7 @@ export async function POST(request: Request) {
   } else if(action==='log_library'){
     const state=await getState(user.userId);const saved=state.library.find(x=>x.id===body.itemId);
     if(!saved)return Response.json({error:'Library meal not found'},{status:404});
+    if(saved.nutritionPending)return Response.json({error:'Find or enter nutrition for this receipt food before logging it.'},{status:422});
     const id=crypto.randomUUID(),now=new Date().toISOString();
     const parts=saved.components?.length?libraryComponents(saved):[{...saved,id:crypto.randomUUID(),source:'Personal Library',libraryItemId:saved.id,confidence:1,completeness:.95,resolutionTier:'library' as const}];
     await env.DB.batch([env.DB.prepare('INSERT INTO events (id,user_id,occurred_at,local_date,meal_type,status,note,created_at,updated_at,title) VALUES (?,?,?,?,?,?,?,?,?,?)').bind(id,user.userId,body.occurredAt,localDateFor(body.occurredAt,state.timezone),body.mealType,'estimated','',now,now,saved.name),...itemStatements(id,parts)]);
@@ -386,16 +397,31 @@ export async function POST(request: Request) {
     const settings = await env.DB.prepare('SELECT timezone FROM goals WHERE user_id = ?').bind(user.userId).first<D1Row>();
     await env.DB.prepare(`INSERT INTO events (id,user_id,occurred_at,local_date,meal_type,status,note,created_at,updated_at,title) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(id,user.userId,now,localDateFor(now,String(settings?.timezone ?? DEFAULT_TIMEZONE)),source?.meal_type ?? 'Meal','estimated',source?.note ?? '',now,now,source?.title??'').run();
     await insertItems(id, sourceItems.results.map((row) => ({ ...mapItem(row), id: crypto.randomUUID() })));
+  } else if (action === 'update_library') {
+    const item=body.item;
+    const existing=await env.DB.prepare('SELECT id FROM library_items WHERE id=? AND user_id=?').bind(item.id,user.userId).first();
+    if(!existing)return Response.json({error:'Library food not found'},{status:404});
+    if(item.components?.length){
+      for(const key of ['calories','protein','carbs','fat','fiber','iron','calcium','vitaminC'] as const){
+        const values=item.components.map(part=>part[key]);
+        (item as unknown as Record<string,unknown>)[key]=values.every(value=>value==null)?null:values.reduce<number>((sum,value)=>sum+(value??0),0);
+      }
+    }
+    await env.DB.prepare('UPDATE library_items SET name=?,kind=?,alias=?,quantity=?,unit=?,calories=?,protein=?,carbs=?,fat=?,fiber=?,iron=?,calcium=?,vitamin_c=?,serving_grams=?,servings_per_cooked_cup=?,source_label=?,source_url=?,nutrition_pending=?,components=? WHERE id=? AND user_id=?').bind(item.name,item.kind,item.alias,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,item.servingGrams,item.servingsPerCookedCup,item.nutritionPending?'Receipt · nutrition pending':item.sourceLabel,item.sourceUrl,item.nutritionPending?1:0,item.components?.length?JSON.stringify(item.components):null,item.id,user.userId).run();
   } else if (action === 'save_library') {
     const item = body.item as LibraryItem; const now = new Date().toISOString();
-    await env.DB.prepare(`INSERT INTO library_items (id,user_id,name,kind,alias,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,serving_grams,servings_per_cooked_cup,source_label,source_url,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.userId,item.name,item.kind,item.alias,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,item.servingGrams ?? null,item.servingsPerCookedCup ?? null,item.sourceLabel ?? '',item.sourceUrl ?? '',now).run();
+    if(item.nutritionPending){
+      const existing=await env.DB.prepare('SELECT id FROM library_items WHERE user_id=? AND lower(trim(name))=lower(trim(?))').bind(user.userId,item.name).first();
+      if(existing)return Response.json({ok:true});
+    }
+    await env.DB.prepare(`INSERT INTO library_items (id,user_id,name,kind,alias,quantity,unit,calories,protein,carbs,fat,fiber,iron,calcium,vitamin_c,serving_grams,servings_per_cooked_cup,source_label,source_url,created_at,nutrition_pending) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.userId,item.name,item.kind,item.alias,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,item.servingGrams ?? null,item.servingsPerCookedCup ?? null,item.sourceLabel ?? '',item.sourceUrl ?? '',now,item.nutritionPending?1:0).run();
   } else if (action === 'delete_library') {
     await env.DB.prepare('DELETE FROM library_items WHERE id = ? AND user_id = ?').bind(String(body.itemId),user.userId).run();
   } else if(action==='update_library_from_item'){
     const item=body.item as FoodItem;const libraryItemId=String(body.libraryItemId);
     const group=await env.DB.prepare('SELECT components FROM library_items WHERE id=? AND user_id=?').bind(libraryItemId,user.userId).first<D1Row>();
     if(group?.components)return Response.json({error:'This Library entry is a meal group. Log it, edit its ingredients, then save the whole meal.'},{status:400});
-    await env.DB.prepare(`UPDATE library_items SET name=?,quantity=?,unit=?,calories=?,protein=?,carbs=?,fat=?,fiber=?,iron=?,calcium=?,vitamin_c=? WHERE id=? AND user_id=?`).bind(item.name,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,libraryItemId,user.userId).run();
+    await env.DB.prepare(`UPDATE library_items SET nutrition_pending=0,source_label='Manually edited',name=?,quantity=?,unit=?,calories=?,protein=?,carbs=?,fat=?,fiber=?,iron=?,calcium=?,vitamin_c=? WHERE id=? AND user_id=?`).bind(item.name,item.quantity,item.unit,item.calories,item.protein,item.carbs,item.fat,item.fiber,item.iron,item.calcium,item.vitaminC,libraryItemId,user.userId).run();
   } else if (action === 'save_event_to_library') {
     if (!await ownedEvent(body.eventId)) return Response.json({ error: 'Meal not found' }, { status: 404 });
     const event = await env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(body.eventId).first<D1Row>();

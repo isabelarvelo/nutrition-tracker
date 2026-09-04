@@ -1,0 +1,1 @@
+ALTER TABLE `library_items` ADD `nutrition_pending` integer DEFAULT false NOT NULL;

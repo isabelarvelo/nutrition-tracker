@@ -48,6 +48,8 @@ export const nutritionCandidateSchema = z.object({
 });
 
 export const libraryItemSchema = nutrientsSchema.extend({
+  nutritionPending: z.boolean().optional(),
+  components: z.array(foodItemSchema).max(30).optional(),
   id: z.string().max(100),
   name: z.string().trim().min(1).max(200),
   kind: z.enum(['food', 'recipe', 'meal']),
@@ -91,6 +93,7 @@ export const actionSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('delete_event'), eventId: id }),
   z.object({ action: z.literal('repeat'), eventId: id }),
   z.object({ action: z.literal('save_library'), item: libraryItemSchema }),
+  z.object({ action: z.literal('update_library'), item: libraryItemSchema.extend({id}) }),
   z.object({ action: z.literal('delete_library'), itemId: id }),
   z.object({ action: z.literal('update_library_from_item'), libraryItemId: id, item: foodItemSchema }),
   z.object({ action: z.literal('save_event_to_library'), eventId: id, name: z.string().trim().max(200).optional() }),
